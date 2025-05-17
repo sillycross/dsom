@@ -1,6 +1,7 @@
 #include "vm.h"
 #include "runtime_utils.h"
 #include "deegen_options.h"
+#include "som_class.h"
 
 VM* WARN_UNUSED VM::Create()
 {
@@ -121,12 +122,6 @@ bool WARN_UNUSED VM::InitializeVMBase()
     m_spdsPageAllocLimit = -static_cast<int32_t>(x_pageSize);
 
     m_executionThreadSpdsAlloc.SetHost(this);
-    m_compilerThreadSpdsAlloc.SetHost(this);
-
-    for (size_t i = 0; i < x_numSpdsAllocatableClassNotUsingLfFreelist; i++)
-    {
-        m_spdsCompilerThreadFreeList[i] = SpdsPtr<void> { 0 };
-    }
 
     for (size_t i = 0; i < x_numSpdsAllocatableClassNotUsingLfFreelist; i++)
     {
@@ -287,556 +282,88 @@ int32_t WARN_UNUSED VM::SpdsAllocatePageSlowPathImpl()
 
 bool WARN_UNUSED VM::InitializeVMGlobalData()
 {
-    for (size_t i = 0; i < x_totalLuaMetamethodKind; i++)
-    {
-        m_stringNameForMetatableKind[i] = CreateStringObjectFromRawString(x_luaMetatableStringName[i], static_cast<uint32_t>(std::char_traits<char>::length(x_luaMetatableStringName[i])));
-        Assert(m_stringNameForMetatableKind[i].As()->m_hashHigh == x_luaMetamethodHashes[i]);
-        Assert(GetMetamethodOrdinalFromStringName(m_stringNameForMetatableKind[i].As()) == static_cast<int>(i));
-    }
-
-    for (size_t i = 0; i < x_numInlineCapacitySteppings; i++)
-    {
-        m_initialStructureForDifferentInlineCapacity[i].m_value = 0;
-    }
     m_filePointerForStdout = stdout;
     m_filePointerForStderr = stderr;
 
-    m_metatableForNil = UserHeapPointer<void>();
-    m_metatableForBoolean = UserHeapPointer<void>();
-    m_metatableForNumber = UserHeapPointer<void>();
-    m_metatableForString = UserHeapPointer<void>();
-    m_metatableForFunction = UserHeapPointer<void>();
-    m_metatableForCoroutine = UserHeapPointer<void>();
-
-    m_emptyString = nullptr;
-    m_toStringString.m_value = 0;
-    m_stringNameForToStringMetamethod.m_value = 0;
-    m_initialHiddenClassOfMetatableForString.m_value = 0;
-
-    m_usrPRNG = nullptr;
+    m_somGlobals = nullptr;
+    m_stringHiddenClass = nullptr;
+    m_arrayHiddenClass = nullptr;
+    m_objectClass = nullptr;
+    m_classClass = nullptr;
+    m_metaclassClass = nullptr;
+    m_nilClass = nullptr;
+    m_booleanClass = nullptr;
+    m_trueClass = nullptr;
+    m_falseClass = nullptr;
+    m_integerClass = nullptr;
+    m_doubleClass = nullptr;
+    m_blockClass = nullptr;
+    m_block1Class = nullptr;
+    m_block2Class = nullptr;
+    m_block3Class = nullptr;
+    m_methodClass = nullptr;
+    m_symbolClass = nullptr;
+    m_primitiveClass = nullptr;
+    m_systemClass = nullptr;
+    m_metaclassClassLoaded = false;
 
     CreateRootCoroutine();
     return true;
-}
-
-bool WARN_UNUSED VM::InitializeVMStringManager()
-{
-    static constexpr uint32_t x_initialSize = 1024;
-    m_hashTable = new (std::nothrow) GeneralHeapPointer<HeapString>[x_initialSize];
-    CHECK_LOG_ERROR(m_hashTable != nullptr, "Failed to allocate space for initial hash table");
-
-    static_assert(x_stringConserHtNonexistentValue == 0, "required for memset");
-    memset(m_hashTable, 0, sizeof(GeneralHeapPointer<HeapString>) * x_initialSize);
-
-    m_hashTableSizeMask = x_initialSize - 1;
-    m_elementCount = 0;
-
-    // Create a special key used as an exotic index into the table
-    //
-    // The content of the string and its hash value doesn't matter,
-    // because we don't put this string into the global hash table thus it will never be found by others.
-    //
-    // We give it some content for debug purpose, but, we give it a fake hash value, to avoids unnecessary
-    // collision with the real string of that value in the Structure's hash table.
-    //
-    auto createSpecialKey = [&](const char* debugName, uint64_t fakeHash) -> UserHeapPointer<HeapString>
-    {
-        StringLengthAndHash slah {
-            .m_length = strlen(debugName),
-            .m_hashValue = fakeHash
-        };
-
-        size_t allocationLength = HeapString::ComputeAllocationLengthForString(slah.m_length);
-        HeapPtrTranslator translator = GetHeapPtrTranslator();
-        UserHeapPointer<void> uhp = AllocFromUserHeap(static_cast<uint32_t>(allocationLength));
-
-        HeapString* ptr = translator.TranslateToRawPtr(uhp.AsNoAssert<HeapString>());
-
-        ptr->PopulateHeader(slah);
-        // Copy the trailing '\0' as well
-        //
-        memcpy(ptr->m_string, debugName, slah.m_length + 1);
-
-        return uhp.As<HeapString>();
-    };
-
-    // Create the special key used as the key for metatable slot in PolyMetatable mode
-    //
-    m_specialKeyForMetatableSlot = createSpecialKey("(hidden_mt_tbl)" /*debugName*/, 0x1F2E3D4C5B6A798LL /*specialHash*/);
-
-    // Create the special keys for 'false' and 'true' index
-    //
-    m_specialKeyForBooleanIndex[0] = createSpecialKey("(hidden_false)" /*debugName*/, 0x897A6B5C4D3E2F1LL /*specialHash*/);
-    m_specialKeyForBooleanIndex[1] = createSpecialKey("(hidden_true)" /*debugName*/, 0xC5B4D6A3E792F81LL /*specialHash*/);
-    return true;
-}
-
-void VM::CleanupVMStringManager()
-{
-    if (m_hashTable != nullptr)
-    {
-        delete [] m_hashTable;
-    }
 }
 
 bool WARN_UNUSED VM::Initialize()
 {
     static_assert(x_segmentRegisterSelfReferencingOffset == offsetof_member_v<&VM::m_self>);
 
-    bool success = false;
     CHECK_LOG_ERROR(InitializeVMBase());
-    CHECK_LOG_ERROR(InitializeVMStringManager());
-    Auto(if (!success) CleanupVMStringManager());
     CHECK_LOG_ERROR(InitializeVMGlobalData());
-    success = true;
     return true;
 }
 
 void VM::Cleanup()
 {
-    CleanupVMStringManager();
-}
-
-namespace {
-
-// Compare if 's' is equal to the abstract multi-piece string represented by 'iterator'
-//
-// The iterator should provide two methods:
-// (1) bool HasMore() returns true if it has not yet reached the end
-// (2) std::pair<const void*, uint32_t> GetAndAdvance() returns the current string piece and advance the iterator
-//
-template<typename Iterator>
-bool WARN_UNUSED ALWAYS_INLINE CompareMultiPieceStringEqual(Iterator iterator, const HeapString* s)
-{
-    uint32_t length = s->m_length;
-    const uint8_t* ptr = s->m_string;
-    while (iterator.HasMore())
-    {
-        const void* curStr;
-        uint32_t curLen;
-        std::tie(curStr, curLen) = iterator.GetAndAdvance();
-
-        if (curLen > length)
-        {
-            return false;
-        }
-        if (memcmp(ptr, curStr, curLen) != 0)
-        {
-            return false;
-        }
-        ptr += curLen;
-        length -= curLen;
-    }
-    return length == 0;
-}
-
-template<typename Iterator>
-HeapString* WARN_UNUSED ALWAYS_INLINE MaterializeMultiPieceString(VM* vm, Iterator iterator, StringLengthAndHash slah)
-{
-    size_t allocationLength = HeapString::ComputeAllocationLengthForString(slah.m_length);
-    VM_FAIL_IF(!IntegerCanBeRepresentedIn<uint32_t>(allocationLength),
-               "Cannot create a string longer than 4GB (attempted length: %llu bytes).", static_cast<unsigned long long>(allocationLength));
-
-    HeapPtrTranslator translator = vm->GetHeapPtrTranslator();
-    UserHeapPointer<void> uhp = vm->AllocFromUserHeap(static_cast<uint32_t>(allocationLength));
-
-    HeapString* ptr = translator.TranslateToRawPtr(uhp.AsNoAssert<HeapString>());
-    ptr->PopulateHeader(slah);
-
-    uint8_t* curDst = ptr->m_string;
-    while (iterator.HasMore())
-    {
-        const void* curStr;
-        uint32_t curLen;
-        std::tie(curStr, curLen) = iterator.GetAndAdvance();
-
-        SafeMemcpy(curDst, curStr, curLen);
-        curDst += curLen;
-    }
-
-    // Fill in the trailing '\0', as required by Lua
-    // Note that ComputeAllocationLengthForString has already automatically reserved space for this '\0'
-    //
-    *curDst = 0;
-
-    // Assert that the provided length and hash value matches reality
-    //
-    Assert(curDst - ptr->m_string == static_cast<intptr_t>(slah.m_length));
-    Assert(HashString(ptr->m_string, ptr->m_length) == slah.m_hashValue);
-    return ptr;
-}
-
-}   // anonymous namespace
-
-void VM::ReinsertDueToResize(GeneralHeapPointer<HeapString>* hashTable, uint32_t hashTableSizeMask, GeneralHeapPointer<HeapString> e)
-{
-    uint32_t slot = e.As<HeapString>()->m_hashLow & hashTableSizeMask;
-    while (hashTable[slot].m_value != x_stringConserHtNonexistentValue)
-    {
-        slot = (slot + 1) & hashTableSizeMask;
-    }
-    hashTable[slot] = e;
-}
-
-void VM::ExpandStringConserHashTableIfNeeded()
-{
-    if (likely(m_elementCount <= (m_hashTableSizeMask >> x_stringht_loadfactor_denominator_shift) * x_stringht_loadfactor_numerator))
-    {
-        return;
-    }
-
-    Assert(m_hashTable != nullptr && is_power_of_2(m_hashTableSizeMask + 1));
-    VM_FAIL_IF(m_hashTableSizeMask >= (1U << 29),
-               "Global string hash table has grown beyond 2^30 slots");
-    uint32_t newSize = (m_hashTableSizeMask + 1) * 2;
-    uint32_t newMask = newSize - 1;
-    GeneralHeapPointer<HeapString>* newHt = new (std::nothrow) GeneralHeapPointer<HeapString>[newSize];
-    VM_FAIL_IF(newHt == nullptr,
-               "Out of memory, failed to resize global string hash table to size %u", static_cast<unsigned>(newSize));
-
-    static_assert(x_stringConserHtNonexistentValue == 0, "we are relying on this to do memset");
-    memset(newHt, 0, sizeof(GeneralHeapPointer<HeapString>) * newSize);
-
-    GeneralHeapPointer<HeapString>* cur = m_hashTable;
-    GeneralHeapPointer<HeapString>* end = m_hashTable + m_hashTableSizeMask + 1;
-    while (cur < end)
-    {
-        if (!StringHtCellValueIsNonExistentOrDeleted(cur->m_value))
-        {
-            ReinsertDueToResize(newHt, newMask, *cur);
-        }
-        cur++;
-    }
-    delete [] m_hashTable;
-    m_hashTable = newHt;
-    m_hashTableSizeMask = newMask;
-}
-
-// Insert an abstract multi-piece string into the hash table if it does not exist
-// Return the HeapString
-//
-template<typename Iterator>
-UserHeapPointer<HeapString> WARN_UNUSED VM::InsertMultiPieceString(Iterator iterator)
-{
-    HeapPtrTranslator translator = GetHeapPtrTranslator();
-
-    StringLengthAndHash lenAndHash = HashMultiPieceString(iterator);
-    uint64_t hash = lenAndHash.m_hashValue;
-    size_t length = lenAndHash.m_length;
-    uint8_t expectedHashHigh = static_cast<uint8_t>(hash >> 56);
-    uint32_t expectedHashLow = BitwiseTruncateTo<uint32_t>(hash);
-
-    uint32_t slotForInsertion = static_cast<uint32_t>(-1);
-    uint32_t slot = static_cast<uint32_t>(hash) & m_hashTableSizeMask;
-    while (true)
-    {
-        {
-            GeneralHeapPointer<HeapString> ptr = m_hashTable[slot];
-            if (StringHtCellValueIsNonExistentOrDeleted(ptr))
-            {
-                // If this string turns out to be non-existent, this can be a slot to insert the string
-                //
-                if (slotForInsertion == static_cast<uint32_t>(-1))
-                {
-                    slotForInsertion = slot;
-                }
-                if (StringHtCellValueIsNonExistent(ptr))
-                {
-                    break;
-                }
-                else
-                {
-                    goto next_slot;
-                }
-            }
-
-            HeapPtr<HeapString> s = ptr.As<HeapString>();
-            if (s->m_hashHigh != expectedHashHigh || s->m_hashLow != expectedHashLow || s->m_length != length)
-            {
-                goto next_slot;
-            }
-
-            HeapString* rawPtr = translator.TranslateToRawPtr(s);
-            if (!CompareMultiPieceStringEqual(iterator, rawPtr))
-            {
-                goto next_slot;
-            }
-
-            // We found the string
-            //
-            return translator.TranslateToUserHeapPtr(rawPtr);
-        }
-next_slot:
-        slot = (slot + 1) & m_hashTableSizeMask;
-    }
-
-    // The string is not found, insert it into the hash table
-    //
-    Assert(slotForInsertion != static_cast<uint32_t>(-1));
-    Assert(StringHtCellValueIsNonExistentOrDeleted(m_hashTable[slotForInsertion]));
-
-    m_elementCount++;
-    HeapString* element = MaterializeMultiPieceString(this, iterator, lenAndHash);
-    m_hashTable[slotForInsertion] = translator.TranslateToGeneralHeapPtr(element);
-
-    ExpandStringConserHashTableIfNeeded();
-
-    return translator.TranslateToUserHeapPtr(element);
-}
-
-UserHeapPointer<HeapString> WARN_UNUSED VM::CreateStringObjectFromConcatenation(TValue* start, size_t len)
-{
-#ifndef NDEBUG
-    for (size_t i = 0; i < len; i++)
-    {
-        Assert(start[i].IsPointer());
-        Assert(start[i].AsPointer().As<UserHeapGcObjectHeader>()->m_type == HeapEntityType::String);
-    }
-#endif
-    struct Iterator
-    {
-        bool HasMore()
-        {
-            return m_cur < m_end;
-        }
-
-        std::pair<const uint8_t*, uint32_t> GetAndAdvance()
-        {
-            Assert(m_cur < m_end);
-            HeapString* e = m_translator.TranslateToRawPtr(m_cur->AsPointer().As<HeapString>());
-            m_cur++;
-            return std::make_pair(static_cast<const uint8_t*>(e->m_string), e->m_length);
-        }
-
-        TValue* m_cur;
-        TValue* m_end;
-        HeapPtrTranslator m_translator;
-    };
-
-    return InsertMultiPieceString(Iterator {
-        .m_cur = start,
-        .m_end = start + len,
-        .m_translator = GetHeapPtrTranslator()
-    });
-}
-
-UserHeapPointer<HeapString> WARN_UNUSED VM::CreateStringObjectFromConcatenation(std::pair<const void*, size_t>* start, size_t len)
-{
-    struct Iterator
-    {
-        bool HasMore()
-        {
-            return m_cur < m_end;
-        }
-
-        std::pair<const uint8_t*, uint32_t> GetAndAdvance()
-        {
-            Assert(m_cur < m_end);
-            const uint8_t* ptr = reinterpret_cast<const uint8_t*>(m_cur->first);
-            uint32_t len = static_cast<uint32_t>(m_cur->second);
-            m_cur++;
-            return std::make_pair(ptr, len);
-        }
-
-        std::pair<const void*, size_t>* m_cur;
-        std::pair<const void*, size_t>* m_end;
-    };
-
-    return InsertMultiPieceString(Iterator {
-        .m_cur = start,
-        .m_end = start + len
-    });
-}
-
-UserHeapPointer<HeapString> WARN_UNUSED VM::CreateStringObjectFromConcatenation(UserHeapPointer<HeapString> str1, TValue* start, size_t len)
-{
-#ifndef NDEBUG
-    Assert(str1.As()->m_type == HeapEntityType::String);
-    for (size_t i = 0; i < len; i++)
-    {
-        Assert(start[i].IsPointer());
-        Assert(start[i].AsPointer().As<UserHeapGcObjectHeader>()->m_type == HeapEntityType::String);
-    }
-#endif
-
-    struct Iterator
-    {
-        Iterator(UserHeapPointer<HeapString> str1, TValue* start, size_t len, HeapPtrTranslator translator)
-            : m_isFirst(true)
-            , m_firstString(str1)
-            , m_cur(start)
-            , m_end(start + len)
-            , m_translator(translator)
-        { }
-
-        bool HasMore()
-        {
-            return m_isFirst || m_cur < m_end;
-        }
-
-        std::pair<const uint8_t*, uint32_t> GetAndAdvance()
-        {
-            HeapString* e;
-            if (m_isFirst)
-            {
-                m_isFirst = false;
-                e = m_translator.TranslateToRawPtr(m_firstString.As<HeapString>());
-            }
-            else
-            {
-                Assert(m_cur < m_end);
-                e = m_translator.TranslateToRawPtr(m_cur->AsPointer().As<HeapString>());
-                m_cur++;
-            }
-            return std::make_pair(static_cast<const uint8_t*>(e->m_string), e->m_length);
-        }
-
-        bool m_isFirst;
-        UserHeapPointer<HeapString> m_firstString;
-        TValue* m_cur;
-        TValue* m_end;
-        HeapPtrTranslator m_translator;
-    };
-
-    return InsertMultiPieceString(Iterator(str1, start, len, GetHeapPtrTranslator()));
-}
-
-UserHeapPointer<HeapString> WARN_UNUSED VM::CreateStringObjectFromRawString(const void* str, uint32_t len)
-{
-    struct Iterator
-    {
-        Iterator(const void* str, uint32_t len)
-            : m_str(str)
-            , m_len(len)
-            , m_isFirst(true)
-        { }
-
-        bool HasMore()
-        {
-            return m_isFirst;
-        }
-
-        std::pair<const void*, uint32_t> GetAndAdvance()
-        {
-            Assert(m_isFirst);
-            m_isFirst = false;
-            return std::make_pair(m_str, m_len);
-        }
-
-        const void* m_str;
-        uint32_t m_len;
-        bool m_isFirst;
-    };
-
-    return InsertMultiPieceString(Iterator(str, len));
-}
-
-UserHeapPointer<HeapString> WARN_UNUSED VM::CreateStringObjectFromConcatenationOfSameString(const char* inputStringPtr, uint32_t inputStringLen, size_t n)
-{
-    if (unlikely(inputStringLen == 0 || n == 0))
-    {
-        return VM_GetEmptyString();
-    }
-
-    // Gracefully handle overflow edge case. Note that we cannot compute n*inputStringLen before
-    // validating that it won't overflow, which is why we have two checks below.
-    //
-    VM_FAIL_IF(n >= std::numeric_limits<uint32_t>::max(),
-               "Cannot create a string longer than 4GB (attempted length: %llu*%llu bytes).",
-               static_cast<unsigned long long>(n), static_cast<unsigned long long>(inputStringLen));
-
-    VM_FAIL_IF(n * inputStringLen >= std::numeric_limits<uint32_t>::max(),
-               "Cannot create a string longer than 4GB (attempted length: %llu bytes).", static_cast<unsigned long long>(n * inputStringLen));
-
-    // If we are making a lot of copies of small strings (which is actually the common case),
-    // try to pre-coalesce them together to reduce the # of memcpy calls (and XXH streaming hash updates).
-    //
-    constexpr size_t x_directLimit = 2200;
-    uint64_t buffer64[x_directLimit / sizeof(uint64_t) + 1];
-    uint8_t* buf = reinterpret_cast<uint8_t*>(buffer64);
-
-    uint8_t* coalescedStringPtr;
-    uint32_t coalescedStringLen;
-
-    if (inputStringLen == 1)
-    {
-        // For length == 1 input string, we can simply create a coalesced string by memset
-        //
-        coalescedStringPtr = buf;
-        coalescedStringLen = static_cast<uint32_t>(std::min(x_directLimit, n));
-        memset(buf, inputStringPtr[0], coalescedStringLen);
-    }
-    else if (n >= 4 && inputStringLen * 4 <= x_directLimit)
-    {
-        // Otherwise, we create a coalesced string by doubling until we reach the limit, if beneficial
-        //
-        coalescedStringPtr = buf;
-        coalescedStringLen = inputStringLen;
-        size_t numCopiesInCoalescedString = 1;
-        memcpy(buf, inputStringPtr, inputStringLen);
-        while (coalescedStringLen * 2 <= x_directLimit && numCopiesInCoalescedString * 2 <= n)
-        {
-            memcpy(buf + coalescedStringLen, buf, coalescedStringLen);
-            coalescedStringLen *= 2;
-            numCopiesInCoalescedString *= 2;
-        }
-    }
-    else
-    {
-        // It is not beneficial or possible to create the coalesced string.
-        //
-        coalescedStringPtr = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(inputStringPtr));
-        coalescedStringLen = inputStringLen;
-    }
-
-    Assert(coalescedStringLen > 0 && coalescedStringLen % inputStringLen == 0);
-#ifndef NDEBUG
-    for (size_t i = 0; i < coalescedStringLen; i++)
-    {
-        Assert(coalescedStringPtr[i] == static_cast<uint8_t>(inputStringPtr[i % inputStringLen]));
-    }
-#endif
-
-    struct Iterator
-    {
-        Iterator(const uint8_t* ptr, uint32_t len, uint32_t totalLen)
-            : m_ptr(ptr)
-            , m_len(len)
-            , m_totalLen(totalLen)
-        { }
-
-        bool HasMore()
-        {
-            return m_totalLen > 0;
-        }
-
-        std::pair<const void*, uint32_t> GetAndAdvance()
-        {
-            Assert(m_totalLen > 0);
-            uint32_t consume = std::min(m_len, m_totalLen);
-            m_totalLen -= consume;
-            return std::make_pair(m_ptr, consume);
-        }
-
-        const uint8_t* m_ptr;
-        uint32_t m_len;
-        uint32_t m_totalLen;
-    };
-
-    return InsertMultiPieceString(Iterator(coalescedStringPtr, coalescedStringLen, static_cast<uint32_t>(n * inputStringLen)));
 }
 
 void VM::CreateRootCoroutine()
 {
     // Create global object
     //
-    UserHeapPointer<TableObject> globalObject = CreateGlobalObject(this);
-    m_rootCoroutine = CoroutineRuntimeContext::Create(this, globalObject, CoroutineRuntimeContext::x_rootCoroutineDefaultStackSlots);
+    UserHeapPointer<void> globalObject;
+    m_rootCoroutine = CoroutineRuntimeContext::Create(this, globalObject, 65536 /*numStackSlots*/);
     m_rootCoroutine->m_coroutineStatus.SetResumable(false);
     m_rootCoroutine->m_parent = nullptr;
 }
 
-HeapPtr<TableObject> VM::GetRootGlobalObject()
+SOMObject* VM::GetInternedString(size_t ord)
 {
-    return m_rootCoroutine->m_globalObject.As();
+    TestAssert(ord < m_interner.m_list.size());
+    if (ord >= m_internedStringObjects.size())
+    {
+        m_internedStringObjects.resize(ord + 1, nullptr);
+    }
+    if (m_internedStringObjects[ord] != nullptr)
+    {
+        return m_internedStringObjects[ord];
+    }
+    SOMObject* str = SOMObject::AllocateString(m_interner.m_list[ord].first);
+    m_internedStringObjects[ord] = str;
+    return str;
+}
+
+SOMObject* VM::GetInternedSymbol(size_t ord)
+{
+    TestAssert(ord < m_interner.m_list.size());
+    if (ord >= m_internedSymbolObjects.size())
+    {
+        m_internedSymbolObjects.resize(ord + 1, nullptr);
+    }
+    if (m_internedSymbolObjects[ord] != nullptr)
+    {
+        return m_internedSymbolObjects[ord];
+    }
+    TestAssert(m_symbolClass != nullptr);
+    SOMObject* str = SOMObject::AllocateString(m_interner.m_list[ord].first);
+    str->m_hiddenClass = SystemHeapPointer<SOMClass>(m_symbolClass).m_value;
+    m_internedSymbolObjects[ord] = str;
+    return str;
 }

@@ -8,23 +8,17 @@
 
 #define LANGUAGE_EXPOSED_HEAP_OBJECT_INFO_LIST                                          \
   /* Enum Name                      C++ name                        Lives in       */   \
-    (String,                        HeapString,                     HOI_USR_HEAP)       \
-  , (Function,                      FunctionObject,                 HOI_USR_HEAP)       \
-  , (Userdata,                      HeapCDataObject,                HOI_USR_HEAP)       \
+    (Function,                      FunctionObject,                 HOI_USR_HEAP)       \
   , (Thread,                        CoroutineRuntimeContext,        HOI_USR_HEAP)       \
-  , (Table,                         TableObject,                    HOI_USR_HEAP)       \
+  , (Object,                        SOMObject,                      HOI_USR_HEAP)       \
 
 #define HEAP_OBJECT_INFO_LIST                                                           \
   /* Enum Name                      C++ name                        Lives in       */   \
     LANGUAGE_EXPOSED_HEAP_OBJECT_INFO_LIST                                              \
-  , (ArraySparseMap,                ArraySparseMap,                 HOI_USR_HEAP)       \
   , (Upvalue,                       Upvalue,                        HOI_USR_HEAP)       \
   , (UnlinkedCodeBlock,             UnlinkedCodeBlock,              HOI_SYS_HEAP)       \
   , (ExecutableCode,                ExecutableCode,                 HOI_SYS_HEAP)       \
-  , (Structure,                     Structure,                      HOI_SYS_HEAP)       \
-  , (StructureAnchorHashTable,      StructureAnchorHashTable,       HOI_SYS_HEAP)       \
-  , (CacheableDictionary,           CacheableDictionary,            HOI_SYS_HEAP)       \
-  , (UncacheableDictionary,         UncacheableDictionary,          HOI_SYS_HEAP)       \
+  , (SOMClass,                      SOMClass,                       HOI_SYS_HEAP)       \
 
 #define HOI_ENUM_NAME(hoi) PP_TUPLE_GET_1(hoi)
 #define HOI_CLASS_NAME(hoi) PP_TUPLE_GET_2(hoi)

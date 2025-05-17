@@ -39,7 +39,6 @@ else()
   message( FATAL_ERROR "Unknown build flavor!" )
 endif()
 
-add_subdirectory(unit_test)
 add_subdirectory(deegen_common_snippets)
 add_subdirectory(builtin_libs)
 add_subdirectory(bytecodes)

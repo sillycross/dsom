@@ -1,36 +1,17 @@
 SET(DEEGEN_BYTECODE_DEFINITION_SOURCES
-  arithmetic_bytecodes.cpp
-  comparison_bytecodes.cpp
-  call_bytecodes.cpp
-  global_get.cpp
-  global_put.cpp
-  return_bytecodes.cpp
   bytecode_mov.cpp
-  unconditional_branch.cpp
-  set_constant_value.cpp
   new_closure.cpp
-  table_dup.cpp
-  table_get_by_id.cpp
-  table_get_by_val.cpp
-  table_put_by_id.cpp
-  table_put_by_val.cpp
-  table_get_by_imm.cpp
-  table_put_by_imm.cpp
-  unary_minus.cpp
-  table_new.cpp
   upvalue_bytecodes.cpp
-  numeric_for_loop.cpp
-  equality_bytecodes.cpp
-  test_and_branch_bytecodes.cpp
-  logical_not.cpp
-  length_operator.cpp
-  variadic_args_accessor.cpp
   range_fill_nils.cpp
-  concat.cpp
-  table_variadic_put_by_seq.cpp
-  iterative_for_loop.cpp
-  iterative_for_loop_kv.cpp
-  tail_call_bytecodes.cpp
+  return_bytecodes.cpp
+  unconditional_branch.cpp
+  som_global_get.cpp
+  som_call.cpp
+  som_super_call.cpp
+  som_self_call.cpp
+  som_array_dup.cpp
+  som_field.cpp
+  som_throw.cpp
 )
 
 set(fps_exec "${PROJECT_BINARY_DIR}/deegen/fps")

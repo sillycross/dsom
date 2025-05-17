@@ -1,67 +1,23 @@
 #pragma once
 
 #include "common_utils.h"
-#include "lj_strfmt_num.h"
-#include "lj_strscan.h"
 #include "memory_ptr.h"
 #include "vm.h"
-#include "structure.h"
-#include "table_object.h"
 #include "spds_doubly_linked_list.h"
 #include "baseline_jit_codegen_helper.h"
 #include "bytecode_builder_utils.h"
+#include "som_class.h"
 
 class StackFrameHeader;
 class CodeBlock;
 
 class Upvalue;
 
-inline void NO_RETURN WriteBarrierSlowPath(void* /*obj*/, uint8_t* /*cellState*/)
-{
-    // TODO: implement
-    ReleaseAssert(false && "unimplemented");
-}
-
-template<size_t cellStateOffset, typename T, typename = std::enable_if_t<IsPtrOrHeapPtr<T, uint8_t>>>
-void NO_INLINE WriteBarrierSlowPathEnter(T ptr)
-{
-    uint8_t* raw = TranslateToRawPointer(ptr);
-    WriteBarrierSlowPath(raw, raw + cellStateOffset);
-}
-
-template void NO_INLINE WriteBarrierSlowPathEnter<offsetof_member_v<&UserHeapGcObjectHeader::m_cellState>, uint8_t*, void>(uint8_t* ptr);
-template void NO_INLINE WriteBarrierSlowPathEnter<offsetof_member_v<&UserHeapGcObjectHeader::m_cellState>, HeapPtr<uint8_t>, void>(HeapPtr<uint8_t> ptr);
-template void NO_INLINE WriteBarrierSlowPathEnter<offsetof_member_v<&SystemHeapGcObjectHeader::m_cellState>, uint8_t*, void>(uint8_t* ptr);
-template void NO_INLINE WriteBarrierSlowPathEnter<offsetof_member_v<&SystemHeapGcObjectHeader::m_cellState>, HeapPtr<uint8_t>, void>(HeapPtr<uint8_t> ptr);
-
-template<size_t cellStateOffset, typename T, typename = std::enable_if_t<IsPtrOrHeapPtr<T, uint8_t>>>
-void ALWAYS_INLINE WriteBarrierImpl(T ptr)
-{
-    uint8_t cellState = ptr[cellStateOffset];
-    constexpr uint8_t blackThreshold = 0;
-    if (likely(cellState > blackThreshold))
-    {
-        return;
-    }
-    WriteBarrierSlowPathEnter<cellStateOffset>(ptr);
-}
-
-template<typename T>
-void WriteBarrier(T ptr)
-{
-    static_assert(std::is_pointer_v<T>);
-    using RawType = std::remove_pointer_t<remove_heap_ptr_t<T>>;
-    static_assert(std::is_same_v<value_type_of_member_object_pointer_t<decltype(&RawType::m_cellState)>, GcCellState>);
-    constexpr size_t x_offset = offsetof_member_v<&RawType::m_cellState>;
-    static_assert(x_offset == offsetof_member_v<&UserHeapGcObjectHeader::m_cellState> || x_offset == offsetof_member_v<&SystemHeapGcObjectHeader::m_cellState>);
-    WriteBarrierImpl<x_offset>(ReinterpretCastPreservingAddressSpace<uint8_t*>(ptr));
-}
-
 struct CoroutineStatus
 {
     // Must start with the coroutine distinguish-bit set because this class occupies the ArrayType field
     //
-    constexpr CoroutineStatus() : m_asValue(ArrayType::x_coroutineTypeTag) { }
+    constexpr CoroutineStatus() : m_asValue(0) { }
     explicit constexpr CoroutineStatus(uint8_t value) : m_asValue(value) { }
 
     // True iff it is legal to use 'coroutine.resume' on this coroutine.
@@ -83,8 +39,6 @@ struct CoroutineStatus
     // (3) !IsResumable() && !IsDead() => a coroutine in the stack of the active coroutines
     //
 
-    constexpr bool IsCoroutineObject() { return (m_asValue & ArrayType::x_coroutineTypeTag) > 0; }
-
     static constexpr CoroutineStatus CreateInitStatus()
     {
         CoroutineStatus res;
@@ -98,9 +52,8 @@ struct CoroutineStatus
     //
     static constexpr bool WARN_UNUSED IsCoroutineObjectAndResumable(uint8_t arrTypeField)
     {
-        constexpr uint8_t maskToCheck = (ArrayType::x_coroutineTypeTag | BFM_isResumable::x_maskForGet);
+        constexpr uint8_t maskToCheck = BFM_isResumable::x_maskForGet;
         bool result = (arrTypeField & maskToCheck) == maskToCheck;
-        AssertIff(result, CoroutineStatus { arrTypeField }.IsCoroutineObject() && CoroutineStatus { arrTypeField }.IsResumable());
         return result;
     }
 
@@ -119,7 +72,7 @@ public:
     static constexpr size_t x_stackOverflowProtectionAreaSize = 65536;
     static_assert(x_stackOverflowProtectionAreaSize % VM::x_pageSize == 0);
 
-    static CoroutineRuntimeContext* Create(VM* vm, UserHeapPointer<TableObject> globalObject, size_t numStackSlots = x_defaultStackSlots);
+    static CoroutineRuntimeContext* Create(VM* vm, UserHeapPointer<void> globalObject, size_t numStackSlots = x_defaultStackSlots);
 
     void CloseUpvalues(TValue* base);
 
@@ -142,7 +95,7 @@ public:
 
     // The global object of this coroutine
     //
-    UserHeapPointer<TableObject> m_globalObject;
+    UserHeapPointer<void> m_globalObject;
 
     // A temporary buffer used by DFG JIT code to pass values between JIT code and AOT slow path
     // This buffer should come before the "cold" members of this struct, so we can index this with disp8 addressing mode
@@ -174,8 +127,6 @@ public:
     //
     TValue* m_stackBegin;
 };
-
-UserHeapPointer<TableObject> CreateGlobalObject(VM* vm);
 
 // Base class for some executable, either an intrinsic, or a bytecode function with some fixed global object, or a user C function
 //
@@ -450,7 +401,7 @@ class DfgCodeBlock;
 class CodeBlock final : public ExecutableCode
 {
 public:
-    static CodeBlock* WARN_UNUSED Create(VM* vm, UnlinkedCodeBlock* ucb, UserHeapPointer<TableObject> globalObject);
+    static CodeBlock* WARN_UNUSED Create(VM* vm, UnlinkedCodeBlock* ucb, UserHeapPointer<void> globalObject);
 
     static constexpr size_t GetTrailingArrayOffset()
     {
@@ -479,7 +430,7 @@ public:
 
     void UpdateBestEntryPoint(void* newEntryPoint);
 
-    UserHeapPointer<TableObject> m_globalObject;
+    UserHeapPointer<void> m_globalObject;
 
     uint32_t m_stackFrameNumSlots;
     uint32_t m_numUpvalues;
@@ -490,6 +441,8 @@ public:
 
     uint32_t m_bytecodeLengthIncludingTailPadding;
     uint32_t m_bytecodeMetadataLength;
+
+    uint8_t m_fnTyMask;
 
     BaselineCodeBlock* m_baselineCodeBlock;
     DfgCodeBlock* m_dfgCodeBlock;
@@ -515,18 +468,21 @@ namespace DeegenBytecodeBuilder { class BytecodeBuilder; }
 class UnlinkedCodeBlock : public SystemHeapGcObjectHeader
 {
 public:
-    static UnlinkedCodeBlock* WARN_UNUSED Create(VM* vm, HeapPtr<TableObject> globalObject)
+    static UnlinkedCodeBlock* WARN_UNUSED Create(VM* vm, HeapPtr<void> /*globalObject*/)
     {
         size_t sizeToAllocate = RoundUpToMultipleOf<8>(GetTrailingArrayOffset() + x_num_bytecode_metadata_struct_kinds_ * sizeof(uint16_t));
         uint8_t* addressBegin = TranslateToRawPointer(vm, vm->AllocFromSystemHeap(static_cast<uint32_t>(sizeToAllocate)).AsNoAssert<uint8_t>());
         UnlinkedCodeBlock* ucb = reinterpret_cast<UnlinkedCodeBlock*>(addressBegin);
+        ConstructInPlace(ucb);
         SystemHeapGcObjectHeader::Populate(ucb);
         ucb->m_uvFixUpCompleted = false;
-        ucb->m_defaultGlobalObject = globalObject;
+        //ucb->m_defaultGlobalObject = globalObject;
         ucb->m_rareGOtoCBMap = nullptr;
         ucb->m_parent = nullptr;
         ucb->m_defaultCodeBlock = nullptr;
         ucb->m_parserUVGetFixupList = nullptr;
+        ucb->m_fnKind = SOMDetailEntityType::SOM_Method;
+        ucb->m_trivialFnType = SOMMethodLookupResultKind::SOM_NormalMethod;
         return ucb;
     }
 
@@ -535,17 +491,20 @@ public:
         return offsetof_member_v<&UnlinkedCodeBlock::m_bytecodeMetadataUseCounts>;
     }
 
-    CodeBlock* WARN_UNUSED ALWAYS_INLINE GetCodeBlock(UserHeapPointer<TableObject> globalObject)
+    CodeBlock* WARN_UNUSED ALWAYS_INLINE GetCodeBlock(UserHeapPointer<void> /*globalObject*/)
     {
+        return m_defaultCodeBlock;
+#if 0
         if (likely(globalObject == m_defaultGlobalObject))
         {
             Assert(m_defaultCodeBlock != nullptr);
             return m_defaultCodeBlock;
         }
         return GetCodeBlockSlowPath(globalObject);
+#endif
     }
 
-    CodeBlock* WARN_UNUSED NO_INLINE GetCodeBlockSlowPath(UserHeapPointer<TableObject> globalObject)
+    CodeBlock* WARN_UNUSED NO_INLINE GetCodeBlockSlowPath(UserHeapPointer<void> globalObject)
     {
         if (unlikely(m_rareGOtoCBMap == nullptr))
         {
@@ -573,7 +532,7 @@ public:
     bool m_hasVariadicArguments;
     uint32_t m_numFixedArguments;
 
-    UserHeapPointer<TableObject> m_defaultGlobalObject;
+    UserHeapPointer<void> m_defaultGlobalObject;
     CodeBlock* m_defaultCodeBlock;
     using RareGlobalObjectToCodeBlockMap = std::unordered_map<int64_t, CodeBlock*>;
     RareGlobalObjectToCodeBlockMap* m_rareGOtoCBMap;
@@ -590,6 +549,11 @@ public:
     uint32_t m_numUpvalues;
     uint32_t m_bytecodeMetadataLength;
     uint32_t m_stackFrameNumSlots;
+
+    SOMDetailEntityType m_fnKind;
+    SOMMethodLookupResultKind m_trivialFnType;
+
+    std::string m_debugName;
 
     // Only used during parsing. Always nullptr at runtime.
     // It doesn't have to sit in this struct but the memory consumption of this struct simply shouldn't matter.
@@ -713,7 +677,7 @@ public:
         return diff;
     }
 
-    UserHeapPointer<TableObject> m_globalObject;
+    UserHeapPointer<void> m_globalObject;
 
     uint32_t m_stackFrameNumSlots;
     uint32_t m_numBytecodes;
@@ -753,7 +717,7 @@ public:
         return offsetof_member_v<&DfgCodeBlock::m_slowPathData>;
     }
 
-    UserHeapPointer<TableObject> m_globalObject;
+    UserHeapPointer<void> m_globalObject;
 
     uint32_t m_stackFrameNumSlots;
 
@@ -821,7 +785,7 @@ public:
             //
             HeapPtr<Upvalue> newNode = CreateUpvalueImpl(rc->m_upvalueList /*prev*/, dst, isImmutable);
             rc->m_upvalueList = newNode;
-            WriteBarrier(rc);
+            //WriteBarrier(rc);
             return newNode;
         }
         else
@@ -870,7 +834,7 @@ public:
             Assert(prev.m_value == 0 || prev.As()->m_ptr < dst);
             HeapPtr<Upvalue> newNode = CreateUpvalueImpl(prev, dst, isImmutable);
             TCSet(cur->m_prev, UserHeapPointer<Upvalue>(newNode));
-            WriteBarrier(cur);
+            //WriteBarrier(cur);
             return newNode;
         }
     }
@@ -912,7 +876,7 @@ public:
 };
 static_assert(sizeof(Upvalue) == 32);
 
-inline void CoroutineRuntimeContext::CloseUpvalues(TValue* base)
+inline void __attribute__((__used__)) CoroutineRuntimeContext::CloseUpvalues(TValue* base)
 {
     VM* vm = VM::GetActiveVMForCurrentThread();
     UserHeapPointer<Upvalue> cur = m_upvalueList;
@@ -931,7 +895,7 @@ inline void CoroutineRuntimeContext::CloseUpvalues(TValue* base)
     m_upvalueList = cur;
     if (cur.m_value != 0)
     {
-        WriteBarrier(this);
+        //WriteBarrier(this);
     }
 }
 
@@ -940,7 +904,7 @@ class FunctionObject
 public:
     // Does not fill 'm_executable' or upvalue array
     //
-    static UserHeapPointer<FunctionObject> WARN_UNUSED CreateImpl(VM* vm, uint8_t numUpvalues)
+    static UserHeapPointer<FunctionObject> WARN_UNUSED CreateImpl(VM* vm, uint8_t numUpvalues, uint8_t fnTyMask)
     {
         size_t sizeToAllocate = GetTrailingArrayOffset() + sizeof(TValue) * numUpvalues;
         sizeToAllocate = RoundUpToMultipleOf<8>(sizeToAllocate);
@@ -948,7 +912,7 @@ public:
         UserHeapGcObjectHeader::Populate(r);
 
         r->m_numUpvalues = numUpvalues;
-        r->m_invalidArrayType = ArrayType::x_invalidArrayType;
+        r->m_invalidArrayType = fnTyMask;
         return r;
     }
 
@@ -958,7 +922,7 @@ public:
     {
         uint32_t numUpvalues = cb->m_numUpvalues;
         Assert(numUpvalues <= std::numeric_limits<uint8_t>::max());
-        UserHeapPointer<FunctionObject> r = CreateImpl(vm, static_cast<uint8_t>(numUpvalues));
+        UserHeapPointer<FunctionObject> r = CreateImpl(vm, static_cast<uint8_t>(numUpvalues), cb->m_fnTyMask);
         SystemHeapPointer<ExecutableCode> executable { static_cast<ExecutableCode*>(cb) };
         TCSet(r.As()->m_executable, executable);
         return r;
@@ -966,8 +930,9 @@ public:
 
     static UserHeapPointer<FunctionObject> WARN_UNUSED CreateCFunc(VM* vm, SystemHeapPointer<ExecutableCode> executable, uint8_t numUpvalues = 0)
     {
+        constexpr uint8_t fnTyMask = static_cast<uint8_t>(static_cast<uint8_t>(SOM_Method) + static_cast<uint8_t>(SOM_NormalMethod) * 16);
         Assert(TranslateToRawPointer(executable.As())->IsUserCFunction());
-        UserHeapPointer<FunctionObject> r = CreateImpl(vm, numUpvalues);
+        UserHeapPointer<FunctionObject> r = CreateImpl(vm, numUpvalues, fnTyMask);
         TCSet(r.As()->m_executable, executable);
         return r;
     }
@@ -1124,10 +1089,10 @@ class ScriptModule
 public:
     std::string m_name;
     std::vector<UnlinkedCodeBlock*> m_unlinkedCodeBlocks;
-    UserHeapPointer<TableObject> m_defaultGlobalObject;
+    UserHeapPointer<void> m_defaultGlobalObject;
     UserHeapPointer<FunctionObject> m_defaultEntryPoint;
 
-    static std::unique_ptr<ScriptModule> WARN_UNUSED LegacyParseScriptFromJSONBytecodeDump(VM* vm, UserHeapPointer<TableObject> globalObject, const std::string& content);
+    static std::unique_ptr<ScriptModule> WARN_UNUSED LegacyParseScriptFromJSONBytecodeDump(VM* vm, UserHeapPointer<void> globalObject, const std::string& content);
 };
 
 // The return statement is required to fill nil up to x_minNilFillReturnValues values even if it returns less than that many values
@@ -1143,9 +1108,7 @@ inline void PrintTValue(FILE* fp, TValue val)
     else if (val.IsDouble())
     {
         double dbl = val.AsDouble();
-        char buf[x_default_tostring_buffersize_double];
-        StringifyDoubleUsingDefaultLuaFormattingOptions(buf /*out*/, dbl);
-        fprintf(fp, "%s", buf);
+        fprintf(fp, "%lf", dbl);
     }
     else if (val.IsMIV())
     {
@@ -1164,408 +1127,7 @@ inline void PrintTValue(FILE* fp, TValue val)
     {
         Assert(val.IsPointer());
         UserHeapGcObjectHeader* p = TranslateToRawPointer(val.AsPointer<UserHeapGcObjectHeader>().As());
-        if (p->m_type == HeapEntityType::String)
-        {
-            HeapString* hs = reinterpret_cast<HeapString*>(p);
-            fwrite(hs->m_string, sizeof(char), hs->m_length /*length*/, fp);
-        }
-        else
-        {
-            if (p->m_type == HeapEntityType::Function)
-            {
-                fprintf(fp, "function");
-            }
-            else if (p->m_type == HeapEntityType::Table)
-            {
-                fprintf(fp, "table");
-            }
-            else if (p->m_type == HeapEntityType::Thread)
-            {
-                fprintf(fp, "thread");
-            }
-            else
-            {
-                fprintf(fp, "(type %d)", static_cast<int>(p->m_type));
-            }
-            fprintf(fp, ": %p", static_cast<void*>(p));
-        }
+        fprintf(fp, "(type %d)", static_cast<int>(p->m_type));
+        fprintf(fp, ": %p", static_cast<void*>(p));
     }
-}
-
-TValue WARN_UNUSED MakeErrorMessage(const char* msg);
-
-constexpr size_t x_lua_max_nested_error_count = 50;
-
-inline TValue WARN_UNUSED MakeErrorMessageForTooManyNestedErrors()
-{
-    const char* errstr = "error in error handling";
-    return MakeErrorMessage(errstr);
-}
-
-TValue WARN_UNUSED MakeErrorMessageForUnableToCall(TValue badValue);
-
-// The varg part of each inlined function can always
-// be represented as a list of locals plus a suffix of the original function's varg
-//
-class InlinedFunctionVarArgRepresentation
-{
-public:
-    // The prefix ordinals
-    //
-    std::vector<int> m_prefix;
-    // The suffix of the original function's varg beginning at that ordinal (inclusive)
-    //
-    int m_suffix;
-};
-
-class InliningStackEntry
-{
-public:
-    // The base ordinal of stack frame header
-    //
-    int m_baseOrd;
-    // Number of fixed arguments for this function
-    //
-    int m_numArguments;
-    // Number of locals for this function
-    //
-    int m_numLocals;
-    // Varargs of this function
-    //
-    InlinedFunctionVarArgRepresentation m_varargs;
-};
-
-inline TValue WARN_UNUSED GetMetamethodForValue(TValue value, LuaMetamethodKind mtKind)
-{
-    UserHeapPointer<void> metatableMaybeNull = GetMetatableForValue(value);
-    if (metatableMaybeNull.m_value != 0)
-    {
-        HeapPtr<TableObject> metatable = metatableMaybeNull.As<TableObject>();
-        return GetMetamethodFromMetatable(metatable, mtKind);
-    }
-    else
-    {
-        return TValue::Nil();
-    }
-}
-
-// This is the official Lua 5.3/5.4 implementation of the modulus operator.
-// Note that the semantics of the below implementation is different from the Lua 5.1/5.2 implementation
-// This implementation is here for future reference only, since we currently target Lua 5.1
-//
-inline double WARN_UNUSED ModulusWithLuaSemantics_PUCLuaReference_5_3(double a, double b)
-{
-    // Quoted from PUC Lua llimits.h:320:
-    //     modulo: defined as 'a - floor(a/b)*b'; the direct computation
-    //     using this definition has several problems with rounding errors,
-    //     so it is better to use 'fmod'. 'fmod' gives the result of
-    //     'a - trunc(a/b)*b', and therefore must be corrected when
-    //     'trunc(a/b) ~= floor(a/b)'. That happens when the division has a
-    //     non-integer negative result: non-integer result is equivalent to
-    //     a non-zero remainder 'm'; negative result is equivalent to 'a' and
-    //     'b' with different signs, or 'm' and 'b' with different signs
-    //     (as the result 'm' of 'fmod' has the same sign of 'a').
-    //
-    double m = fmod(a, b);
-    if ((m > 0) ? b < 0 : (m < 0 && b > 0)) m += b;
-    return m;
-}
-
-// This is the official Lua 5.1/5.2 implementation of the modulus operator.
-// It involves a call into the math library, which is slow.
-// This implementation here is for reference and test purpose only.
-// Internally, we use LuaJIT's a better implementation in hand-coded assembly (see a few lines below).
-//
-inline double WARN_UNUSED ModulusWithLuaSemantics_PUCLuaReference_5_1(double a, double b)
-{
-    // Code from PUC Lua 5.2 luaconf.h:436
-    //
-    return a - floor(a / b) * b;
-}
-
-// LuaJIT's more optimized implementation of Lua modulus operator.
-// Note that this implementation is compatible with Lua 5.1/5.2, but not Lua 5.3/5.4.
-//
-// The assembly code is adapted from LuaJIT vm_x64.dasc
-//
-// I realized that LuaJIT used this implementation only because it supports legacy CPU without
-// SSE4's roundsd instruction..
-// Since SSE4 is released back in 2006 and supported by most processors after 2008, it should be
-// reasonable to assume that we have SSE4 support.
-//
-// However, it seems like Lua 5.3/5.4's fmod semantics cannot be implemented by roundsd,
-// so I keep this assembly around for now in case we need to adapt it for fmod later..
-//
-inline double WARN_UNUSED ALWAYS_INLINE ModulusWithLuaSemantics_5_1_NoSSE4(double a, double b)
-{
-    double fpr1, fpr2, fpr3, fpr4;
-    uint64_t gpr1;
-    asm (
-        "movapd %[x0], %[x5];"                      // x5 = a
-        "divsd %[x1], %[x0];"                       // x0 = a / b
-
-        "movabsq $0x7FFFFFFFFFFFFFFF, %[r0];"       // x2 = bitcast<double>(0x7FFFFFFFFFFFFFFFULL)
-        "movq %[r0], %[x2];"                        //
-
-        "movabsq $0x4330000000000000, %[r0];"       // x3 = (double)2^52
-        "movq %[r0], %[x3];"                        //
-
-        "movapd %[x0], %[x4];"                      // x4 = abs(a / b)
-        "andpd %[x2], %[x4];"                       //
-
-        "ucomisd %[x4], %[x3];"                     // if (2**52 <= abs(a / b)) goto 1
-        "jbe 1f;"                                   //
-
-        "andnpd %[x0], %[x2];"                      // x2 = signmask(a / b)
-
-        "addsd %[x3], %[x4];"                       // x4 = abs(a / b) + 2^52 - 2^52
-        "subsd %[x3], %[x4];"                       //
-
-        "orpd %[x2], %[x4];"                        // x4 = copysign(x4, x2)
-
-        "movabsq $0x3ff0000000000000, %[r0];"       // x4 -= (x0 < x4) ? 1.0 : 0.0
-        "movq %[r0], %[x2];"                        //
-        "cmpltsd %[x4], %[x0];"                     //
-        "andpd %[x2], %[x0];"                       //
-        "subsd %[x0], %[x4];"                       //
-
-        "movapd %[x5], %[x0];"                      // result = a - x4 * b
-        "mulsd %[x4], %[x1];"                       //
-        "subsd %[x1], %[x0];"                       //
-
-        "jmp 2f;"
-
-        "1:;"
-
-        "mulsd %[x0], %[x1];"                       // result = a - (a / b) * b
-        "movapd %[x5], %[x0];"                      //
-        "subsd %[x1], %[x0];"                       //
-
-        "2:;"
-        :
-            [x0] "+x"(a) /*inout*/,
-            [x1] "+x"(b) /*inout*/,
-            [x2] "=&x"(fpr1) /*scratch*/,
-            [x3] "=&x"(fpr2) /*scratch*/,
-            [x4] "=&x"(fpr3) /*scratch*/,
-            [x5] "=&x"(fpr4) /*scratch*/,
-            [r0] "=&r"(gpr1) /*scratch*/
-        :   /*no read-only input*/
-        :  "cc" /*clobber*/);
-
-    return a;
-}
-
-inline double ALWAYS_INLINE WARN_UNUSED ModulusWithLuaSemantics(double a, double b)
-{
-    return ModulusWithLuaSemantics_PUCLuaReference_5_1(a, b);
-}
-
-// A wrapper around libm pow that provides a fastpath if the exponent is an integer that fits in [-128, 127).
-// If not, it runs ~3% slower than libm pow due to the extra check.
-//
-double WARN_UNUSED math_fast_pow(double b, double ex);
-
-struct DoBinaryOperationConsideringStringConversionResult
-{
-    bool success;
-    double result;
-};
-
-// Lua allows crazy things like "1 " + " 0xf " (which yields 16): string can be silently converted to number (ignoring whitespace) when
-// performing an arithmetic operation. This function does this job. 'func' must be a lambda (double, double) -> double
-//
-inline DoBinaryOperationConsideringStringConversionResult WARN_UNUSED NO_INLINE TryDoBinaryOperationConsideringStringConversion(TValue lhs, TValue rhs, LuaMetamethodKind opKind)
-{
-    if (likely(!lhs.Is<tString>() && !rhs.Is<tString>()))
-    {
-        return { .success = false, .result = Undef<double>() };
-    }
-
-    double lhsNumber;
-    if (lhs.Is<tDouble>())
-    {
-        lhsNumber = lhs.As<tDouble>();
-    }
-    else if (lhs.Is<tString>())
-    {
-        HeapPtr<HeapString> stringObj = lhs.AsPointer<HeapString>().As();
-        StrScanResult ssr = TryConvertStringToDoubleWithLuaSemantics(TranslateToRawPointer(stringObj->m_string), stringObj->m_length);
-        if (ssr.fmt == StrScanFmt::STRSCAN_NUM)
-        {
-            lhsNumber = ssr.d;
-        }
-        else
-        {
-            return { .success = false, .result = Undef<double>() };
-        }
-    }
-    else
-    {
-        return { .success = false, .result = Undef<double>() };
-    }
-
-    double rhsNumber;
-    if (rhs.Is<tDouble>())
-    {
-        rhsNumber = rhs.As<tDouble>();
-    }
-    else if (rhs.Is<tString>())
-    {
-        HeapPtr<HeapString> stringObj = rhs.AsPointer<HeapString>().As();
-        StrScanResult ssr = TryConvertStringToDoubleWithLuaSemantics(TranslateToRawPointer(stringObj->m_string), stringObj->m_length);
-        if (ssr.fmt == StrScanFmt::STRSCAN_NUM)
-        {
-            rhsNumber = ssr.d;
-        }
-        else
-        {
-            return { .success = false, .result = Undef<double>() };
-        }
-    }
-    else
-    {
-        return { .success = false, .result = Undef<double>() };
-    }
-
-    // This is fine: string to integer coercion is already slow enough..
-    // And this string-to-int coercion behavior is just some historical garbage of Lua that probably nobody ever used
-    //
-    switch (opKind)
-    {
-    case LuaMetamethodKind::Add:
-        return { .success = true, .result = lhsNumber + rhsNumber };
-    case LuaMetamethodKind::Sub:
-        return { .success = true, .result = lhsNumber - rhsNumber };
-    case LuaMetamethodKind::Mul:
-        return { .success = true, .result = lhsNumber * rhsNumber };
-    case LuaMetamethodKind::Div:
-        return { .success = true, .result = lhsNumber / rhsNumber };
-    case LuaMetamethodKind::Mod:
-        return { .success = true, .result = ModulusWithLuaSemantics(lhsNumber, rhsNumber) };
-    case LuaMetamethodKind::Pow:
-        return { .success = true, .result = pow(lhsNumber, rhsNumber) };
-    default:
-        Assert(false);
-        __builtin_unreachable();
-    }
-}
-
-inline TValue WARN_UNUSED GetMetamethodForBinaryArithmeticOperation(TValue lhs, TValue rhs, LuaMetamethodKind mtKind)
-{
-    {
-        UserHeapPointer<void> lhsMetatableMaybeNull = GetMetatableForValue(lhs);
-        if (lhsMetatableMaybeNull.m_value != 0)
-        {
-            HeapPtr<TableObject> metatable = lhsMetatableMaybeNull.As<TableObject>();
-            TValue metamethod = GetMetamethodFromMetatable(metatable, mtKind);
-            if (!metamethod.IsNil())
-            {
-                return metamethod;
-            }
-        }
-    }
-
-    {
-        UserHeapPointer<void> rhsMetatableMaybeNull = GetMetatableForValue(rhs);
-        if (rhsMetatableMaybeNull.m_value == 0)
-        {
-            return TValue::Nil();
-        }
-
-        HeapPtr<TableObject> metatable = rhsMetatableMaybeNull.As<TableObject>();
-        return GetMetamethodFromMetatable(metatable, mtKind);
-    }
-}
-
-// For EQ/NEQ operator:
-//     For Lua 5.1 & 5.2, the metamethod is only called if both are table or both are full userdata, AND both share the same metamethod
-//     For Lua 5.3+, the restriction "both share the same metamethod" is removed.
-// For LE/LT/GE/GT operator:
-//     For Lua 5.1, the metamethod is called if both are same type, are not number/string, and both share the same metamethod
-//     For Lua 5.2+, the restriction "both have the same type and both share the same metamethod" is removed.
-//
-template<bool supportsQuicklyRuleOutMetamethod>
-TValue WARN_UNUSED GetMetamethodFromMetatableForComparisonOperation(HeapPtr<TableObject> lhsMetatable, HeapPtr<TableObject> rhsMetatable, LuaMetamethodKind mtKind)
-{
-    TValue lhsMetamethod;
-    {
-        // For 'eq', if either table doesn't have metamethod, the result is 'false', so it's a probable case that worth a fast path.
-        // For 'le' or 'lt', however, the behavior is to throw error, so the situtation becomes just the opposite: it's unlikely the table doesn't have metamethod.
-        //
-        if constexpr(supportsQuicklyRuleOutMetamethod)
-        {
-            if (TableObject::TryQuicklyRuleOutMetamethod(lhsMetatable, mtKind))
-            {
-                return TValue::Nil();
-            }
-        }
-        lhsMetamethod = GetMetamethodFromMetatable(lhsMetatable, mtKind);
-        if (lhsMetamethod.IsNil())
-        {
-            return lhsMetamethod;
-        }
-    }
-
-    TValue rhsMetamethod;
-    {
-        if constexpr(supportsQuicklyRuleOutMetamethod)
-        {
-            if (TableObject::TryQuicklyRuleOutMetamethod(rhsMetatable, mtKind))
-            {
-                return TValue::Nil();
-            }
-        }
-        rhsMetamethod = GetMetamethodFromMetatable(rhsMetatable, mtKind);
-    }
-
-    Assert(!lhsMetamethod.IsInt32() && "unimplemented");
-    Assert(!rhsMetamethod.IsInt32() && "unimplemented");
-
-    // Now, perform a primitive comparison of lhsMetamethod and rhsMetamethod
-    //
-    if (unlikely(lhsMetamethod.IsDouble()))
-    {
-        // If both values are double, we must do a floating point comparison,
-        // otherwise we will fail on edge cases like negative zero (-0 == 0) and NaN (NaN != NaN)
-        // If rhs is not double, ViewAsDouble() gives NaN and the below comparison will also fail as expected.
-        //
-        if (UnsafeFloatEqual(lhsMetamethod.AsDouble(), rhsMetamethod.ViewAsDouble()))
-        {
-            return lhsMetamethod;
-        }
-        else
-        {
-            return TValue::Nil();
-        }
-    }
-    else
-    {
-        // Now we know 'lhsMetamethod' is not a double
-        // So it's safe to perform a bit comparison
-        // Note that the comparison here doesn't involve methamethod or string-to-number coercion, so doing a bit comparison is correct.
-        //
-        if (lhsMetamethod.m_value == rhsMetamethod.m_value)
-        {
-            return lhsMetamethod;
-        }
-        else
-        {
-            return TValue::Nil();
-        }
-    }
-}
-
-inline TValue WARN_UNUSED NO_INLINE __attribute__((__preserve_most__)) GetNewIndexMetamethodFromTableObject(HeapPtr<TableObject> tableObj)
-{
-    TableObject::GetMetatableResult gmr = TableObject::GetMetatable(tableObj);
-    if (unlikely(gmr.m_result.m_value != 0))
-    {
-        HeapPtr<TableObject> metatable = gmr.m_result.As<TableObject>();
-        if (unlikely(!TableObject::TryQuicklyRuleOutMetamethod(metatable, LuaMetamethodKind::NewIndex)))
-        {
-            return GetMetamethodFromMetatable(metatable, LuaMetamethodKind::NewIndex);
-        }
-    }
-    return TValue::Create<tNil>();
 }

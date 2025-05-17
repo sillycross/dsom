@@ -14,12 +14,12 @@
 //
 // TODO: currently the JIT logic is still generated, just unused. We should make this option skip the generation of the JIT tiers altogether.
 //
-constexpr bool x_allow_interpreter_tier_up_to_baseline_jit = true;
+constexpr bool x_allow_interpreter_tier_up_to_baseline_jit = false;
 
 // When this option is false, the baseline JIT won't tier up to the optimizing JIT,
 // so the VM will run in interpreter & baseline JIT mode.
 //
-constexpr bool x_allow_baseline_jit_tier_up_to_optimizing_jit = true;
+constexpr bool x_allow_baseline_jit_tier_up_to_optimizing_jit = false;
 
 // The interpreter maintains how many bytes of bytecodes in each function it has executed to decide when to tier-up.
 // (Note that the metric above is #bytes of bytecodes, not #bytecodes, because it's easier to maintain for the interpreter).

@@ -2,113 +2,16 @@
 
 #include "memory_ptr.h"
 #include "tvalue.h"
-#include "array_type.h"
 #include "jit_memory_allocator.h"
+#include "string_interner.h"
+#include "som_primitives_container.h"
+#include "som_class.h"
 
-enum ThreadKind : uint8_t
-{
-    ExecutionThread,
-    CompilerThread,
-    GCThread
-};
-
-inline thread_local ThreadKind t_threadKind = ExecutionThread;
-
-inline bool IsCompilerThread() { return t_threadKind == CompilerThread; }
-inline bool IsExecutionThread() { return t_threadKind == ExecutionThread; }
-inline bool IsGCThread() { return t_threadKind == GCThread; }
-
-#define METAMETHOD_NAME_LIST            \
-    /* Enum Name,    String Name */     \
-    (Call,           __call)            \
-  , (Add,            __add)             \
-  , (Sub,            __sub)             \
-  , (Mul,            __mul)             \
-  , (Div,            __div)             \
-  , (Mod,            __mod)             \
-  , (Pow,            __pow)             \
-  , (Unm,            __unm)             \
-  , (Concat,         __concat)          \
-  , (Len,            __len)             \
-  , (Eq,             __eq)              \
-  , (Lt,             __lt)              \
-  , (Le,             __le)              \
-  , (Index,          __index)           \
-  , (NewIndex,       __newindex)        \
-  , (ProtectedMt,    __metatable)
-
-enum class LuaMetamethodKind
-{
-#define macro(e) PP_TUPLE_GET_1(e),
-    PP_FOR_EACH(macro, METAMETHOD_NAME_LIST)
-#undef macro
-};
-
-#define macro(e) +1
-constexpr size_t x_totalLuaMetamethodKind = 0 PP_FOR_EACH(macro, METAMETHOD_NAME_LIST);
-#undef macro
-
-constexpr const char* x_luaMetatableStringName[x_totalLuaMetamethodKind] = {
-#define macro(e) PP_STRINGIFY(PP_TUPLE_GET_2(e)),
-    PP_FOR_EACH(macro, METAMETHOD_NAME_LIST)
-#undef macro
-};
-
-using LuaMetamethodBitVectorT = std::conditional_t<x_totalLuaMetamethodKind <= 8, uint8_t,
-                                std::conditional_t<x_totalLuaMetamethodKind <= 16, uint16_t,
-                                std::conditional_t<x_totalLuaMetamethodKind <= 32, uint32_t,
-                                std::conditional_t<x_totalLuaMetamethodKind <= 64, uint64_t,
-                                void /*fire static_assert below*/>>>>;
-static_assert(!std::is_same_v<LuaMetamethodBitVectorT, void>);
-
-constexpr LuaMetamethodBitVectorT x_luaMetamethodBitVectorFullMask = static_cast<LuaMetamethodBitVectorT>(static_cast<uint64_t>(-1) >> (64 - x_totalLuaMetamethodKind));
-
-// This corresponds to the m_high field in corresponding HeapString
+// Uncomment to count how many times each method is called
 //
-inline constexpr std::array<uint8_t, x_totalLuaMetamethodKind> x_luaMetamethodHashes = {
-#define macro(e) constexpr_xxh3::XXH3_64bits_const( std::string_view { PP_STRINGIFY(PP_TUPLE_GET_2(e)) } ) >> 56,
-        PP_FOR_EACH(macro, METAMETHOD_NAME_LIST)
-#undef macro
-};
+//#define ENABLE_SOM_PROFILE_FREQUENCY
 
-inline constexpr std::array<uint8_t, 64> x_luaMetamethodNamesSimpleHashTable = []() {
-    for (size_t i = 0; i < x_totalLuaMetamethodKind; i++)
-    {
-        for (size_t j = i + 1; j < x_totalLuaMetamethodKind; j++)
-        {
-            Assert(x_luaMetamethodHashes[i] != x_luaMetamethodHashes[j]);
-        }
-    }
-
-    constexpr size_t htSize = 64;
-    std::array<uint8_t, htSize> result;
-    for (size_t i = 0; i < htSize; i++) { result[i] = 255; }
-    for (size_t i = 0; i < x_totalLuaMetamethodKind; i++)
-    {
-        size_t slot = x_luaMetamethodHashes[i] % htSize;
-        while (result[slot] != 255)
-        {
-            slot = (slot + 1) % htSize;
-        }
-        result[slot] = static_cast<uint8_t>(i);
-    }
-    return result;
-}();
-
-// Return -1 if not found
-//
-constexpr int WARN_UNUSED GetLuaMetamethodOrdinalFromStringHash(uint8_t hashHigh)
-{
-    constexpr size_t htSize = std::size(x_luaMetamethodNamesSimpleHashTable);
-    size_t slot = hashHigh % htSize;
-    while (true)
-    {
-        uint8_t entry = x_luaMetamethodNamesSimpleHashTable[slot];
-        if (entry == 255) { return -1; }
-        if (x_luaMetamethodHashes[entry] == hashHigh) { return entry; }
-        slot = (slot + 1) % htSize;
-    }
-}
+class SOMObject;
 
 // Normally for each class type, we use one free list for compiler thread and one free list for execution thread.
 // However, some classes may be allocated on the compiler thread but freed on the execution thread.
@@ -117,8 +20,7 @@ constexpr int WARN_UNUSED GetLuaMetamethodOrdinalFromStringHash(uint8_t hashHigh
 //
 #define SPDS_ALLOCATABLE_CLASS_LIST             \
   /* C++ class name   Use lockfree freelist */  \
-    (WatchpointSet,                 false)      \
-  , (JitCallInlineCacheEntry,       false)      \
+    (JitCallInlineCacheEntry,       false)      \
   , (JitGenericInlineCacheEntry,    false)
 
 #define SPDS_CPP_NAME(e) PP_TUPLE_GET_1(e)
@@ -289,215 +191,9 @@ private:
     int32_t m_lastChunkInTheChain;
 };
 
-namespace internal
-{
-
-constexpr uint32_t GetLeastFitCellSizeInSlots(uint32_t slotToFit)
-{
-    // TODO: we haven't implemented the segregated allocator yet, so this function is dummy
-    //
-    return RoundUpToPowerOfTwo(slotToFit);
-}
-
-constexpr uint32_t x_maxInlineCapacity = 253;
-
-// If we want the inline storage to hold at least 'elementToHold' elements, the optimal capacity is not 'elementToHold',
-// as having exactly 'elementToHold' capacity can cause unnecessary internal fragmentation in our segregated allocator.
-// This function computes the optimal capacity.
-//
-constexpr uint8_t ComputeOptimalInlineStorageCapacity(uint8_t elementToHold)
-{
-    Assert(elementToHold <= x_maxInlineCapacity);
-    // A simple heuristic:
-    // If the object contains at least one (but not zero) property, then it's likely more are coming.
-    // So give it at least a few more inline slots
-    //
-    if (elementToHold > 0)
-    {
-        elementToHold = std::max(elementToHold, static_cast<uint8_t>(4));
-    }
-    // The TableObject has a header of 2 slots (16 bytes)
-    //
-    uint32_t minimalSlotsNeeded = elementToHold + 2;
-    uint32_t r32 = GetLeastFitCellSizeInSlots(minimalSlotsNeeded);
-    // Deduce the 2-slot header, that's the true inline capacity we have
-    //
-    r32 -= 2;
-    r32 = std::min(r32, x_maxInlineCapacity);
-    Assert(r32 >= elementToHold);
-    return static_cast<uint8_t>(r32);
-}
-
-constexpr std::array<uint8_t, x_maxInlineCapacity + 1> ComputeOptimalInlineStorageCapacityArray()
-{
-    std::array<uint8_t, x_maxInlineCapacity + 1> r;
-    for (uint8_t i = 0; i <= x_maxInlineCapacity; i++)
-    {
-        r[i] = ComputeOptimalInlineStorageCapacity(i);
-        Assert(r[i] >= i);
-        AssertImp(i > 0, r[i] >= r[i-1]);
-    }
-    for (uint8_t i = 0; i <= x_maxInlineCapacity; i++)
-    {
-        Assert(r[r[i]] == r[i]);
-    }
-    return r;
-}
-
-inline constexpr std::array<uint8_t, x_maxInlineCapacity + 1> x_optimalInlineCapacityArray = ComputeOptimalInlineStorageCapacityArray();
-
-constexpr std::array<uint8_t, x_maxInlineCapacity + 1> ComputeInlineStorageCapacitySteppingArray()
-{
-    std::array<uint8_t, 256> v;
-    for (size_t i = 0; i < 256; i++) { v[i] = 0; }
-    for (size_t i = 0; i <= x_maxInlineCapacity; i++) { v[x_optimalInlineCapacityArray[i]] = 1; }
-    for (size_t i = 1; i < 256; i++) { v[i] += v[i-1]; }
-
-    std::array<uint8_t, x_maxInlineCapacity + 1> r;
-    for (size_t i = 0; i <= x_maxInlineCapacity; i++) { r[i] = v[x_optimalInlineCapacityArray[i]] - 1; }
-    return r;
-}
-
-inline constexpr std::array<uint8_t, x_maxInlineCapacity + 1> x_optimalInlineCapacitySteppingArray = ComputeInlineStorageCapacitySteppingArray();
-
-}   // namespace internal
-
-constexpr size_t x_numInlineCapacitySteppings = internal::x_optimalInlineCapacitySteppingArray[internal::x_maxInlineCapacity] + 1;
-
-namespace internal
-{
-
-constexpr std::array<uint8_t, x_numInlineCapacitySteppings> ComputeInlineStorageSizeForSteppingArray()
-{
-    std::array<uint8_t, x_numInlineCapacitySteppings> r;
-    for (size_t i = 0; i <= x_maxInlineCapacity; i++) { r[x_optimalInlineCapacitySteppingArray[i]] = x_optimalInlineCapacityArray[i]; }
-    return r;
-}
-
-inline constexpr std::array<uint8_t, x_numInlineCapacitySteppings> x_inlineStorageSizeForSteppingArray = ComputeInlineStorageSizeForSteppingArray();
-
-}   // namespace internal
-
-class alignas(8) HeapString
-{
-public:
-    static constexpr uint32_t x_stringStructure = 0x8;
-    // Common object header
-    //
-    uint32_t m_hiddenClass;         // always x_StringStructure
-    HeapEntityType m_type;          // always TypeEnumForHeapObject<HeapString>
-    GcCellState m_cellState;
-
-    // This is the high 8 bits of the XXHash64 value, for quick comparison
-    //
-    uint8_t m_hashHigh;
-    // The ArrayType::x_invalidArrayType bit msut always be set.
-    // Note that we also use the lower bits to represent if this string is a reserved word.
-    // This is fine as long as we have bit 7 (invalidArraType bit) set and bit 6 (isCoroutine bit) unset.
-    //
-    uint8_t m_invalidArrayType;
-
-    // This is the low 32 bits of the XXHash64 value, for hash table indexing and quick comparison
-    //
-    uint32_t m_hashLow;
-    // The length of the string
-    //
-    uint32_t m_length;
-    // The string itself
-    //
-    uint8_t m_string[0];
-
-    static constexpr size_t TrailingArrayOffset()
-    {
-        return offsetof_member_v<&HeapString::m_string>;
-    }
-
-    void PopulateHeader(StringLengthAndHash slah)
-    {
-        m_hiddenClass = x_stringStructure;
-        m_type = TypeEnumForHeapObject<HeapString>;
-        m_cellState = x_defaultCellState;
-
-        m_hashHigh = static_cast<uint8_t>(slah.m_hashValue >> 56);
-        m_invalidArrayType = ArrayType::x_invalidArrayType;
-        m_hashLow = BitwiseTruncateTo<uint32_t>(slah.m_hashValue);
-        m_length = SafeIntegerCast<uint32_t>(slah.m_length);
-    }
-
-    // Returns the allocation length to store a string of length 'length'
-    //
-    static size_t ComputeAllocationLengthForString(size_t length)
-    {
-        // Nonsense: despite Lua string can contain '\0', Lua nevertheless requires string to end with '\0'.
-        //
-        length++;
-        static_assert(TrailingArrayOffset() == sizeof(HeapString));
-        size_t beforeAlignment = TrailingArrayOffset() + length;
-        return RoundUpToMultipleOf<8>(beforeAlignment);
-    }
-
-    // Compare the string represented by 'this' and the string represented by 'other'
-    // -1 if <, 0 if ==, 1 if >
-    //
-    int WARN_UNUSED Compare(HeapString* other)
-    {
-        if (this == other)
-        {
-            return 0;
-        }
-        uint8_t* selfStr = m_string;
-        uint32_t selfLength = m_length;
-        uint8_t* otherStr = other->m_string;
-        uint32_t otherLength = other->m_length;
-        uint32_t minLen = std::min(selfLength, otherLength);
-        // Note that Lua string may contain '\0', so we must use memcmp, not strcmp.
-        //
-        int cmpResult = memcmp(selfStr, otherStr, minLen);
-        if (cmpResult != 0)
-        {
-            return cmpResult;
-        }
-        if (selfLength > minLen)
-        {
-            return 1;
-        }
-        if (otherLength > minLen)
-        {
-            return -1;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-    template<typename T, typename = std::enable_if_t<IsPtrOrHeapPtr<T, HeapString>>>
-    static void SetReservedWord(T self, uint8_t reservedId)
-    {
-        Assert(reservedId + 1 <= 63);
-        uint8_t arrTy = ArrayType::x_invalidArrayType + reservedId + 1;
-        TCSet(self->m_invalidArrayType, arrTy);
-    }
-
-    template<typename T, typename = std::enable_if_t<IsPtrOrHeapPtr<T, HeapString>>>
-    static bool WARN_UNUSED IsReservedWord(T self)
-    {
-        return self->m_invalidArrayType != ArrayType::x_invalidArrayType;
-    }
-
-    template<typename T, typename = std::enable_if_t<IsPtrOrHeapPtr<T, HeapString>>>
-    static uint8_t WARN_UNUSED GetReservedWordOrdinal(T self)
-    {
-        Assert(IsReservedWord(self));
-        Assert(self->m_invalidArrayType > ArrayType::x_invalidArrayType);
-        uint8_t ord = static_cast<uint8_t>(self->m_invalidArrayType - ArrayType::x_invalidArrayType - 1);
-        Assert(ord + 1 <= 63);
-        return ord;
-    }
-};
-static_assert(sizeof(HeapString) == 16);
-
 class ScriptModule;
+
+class SOMClass;
 
 // [ 12GB user heap ] [ 2GB padding ] [ 2GB short-pointer data structures ] [ 2GB system heap ]
 //                                                                          ^
@@ -529,11 +225,6 @@ public:
         return SpdsAllocImpl<VM, true /*isTempAlloc*/>(this);
     }
 
-    SpdsAllocImpl<VM, false /*isTempAlloc*/>& WARN_UNUSED GetCompilerThreadSpdsAlloc()
-    {
-        return m_compilerThreadSpdsAlloc;
-    }
-
     SpdsAllocImpl<VM, false /*isTempAlloc*/>& WARN_UNUSED GetExecutionThreadSpdsAlloc()
     {
         return m_executionThreadSpdsAlloc;
@@ -541,15 +232,7 @@ public:
 
     SpdsAllocImpl<VM, false /*isTempAlloc*/>& WARN_UNUSED GetSpdsAllocForCurrentThread()
     {
-        Assert(!IsGCThread());
-        if (IsCompilerThread())
-        {
-            return GetCompilerThreadSpdsAlloc();
-        }
-        else
-        {
-            return GetExecutionThreadSpdsAlloc();
-        }
+        return GetExecutionThreadSpdsAlloc();
     }
 
     // Grab one 4K page from the SPDS region.
@@ -631,10 +314,7 @@ public:
         static_assert(!x_spdsAllocatableClassUseLfFreelist<T>, "unimplemented yet");
         if constexpr(!x_spdsAllocatableClassUseLfFreelist<T>)
         {
-            Assert(!IsGCThread());
-            SpdsPtr<void>& freelist = IsCompilerThread() ?
-                        m_spdsCompilerThreadFreeList[x_spdsAllocatableClassOrdinal<T>] :
-                        m_spdsExecutionThreadFreeList[x_spdsAllocatableClassOrdinal<T>];
+            SpdsPtr<void>& freelist = m_spdsExecutionThreadFreeList[x_spdsAllocatableClassOrdinal<T>];
             if (likely(freelist.m_value != 0))
             {
                 HeapPtr<void> result = freelist.AsPtr();
@@ -667,10 +347,7 @@ public:
         }
         if constexpr(!x_spdsAllocatableClassUseLfFreelist<T>)
         {
-            Assert(!IsGCThread());
-            SpdsPtr<void>& freelist = IsCompilerThread() ?
-                        m_spdsCompilerThreadFreeList[x_spdsAllocatableClassOrdinal<T>] :
-                        m_spdsExecutionThreadFreeList[x_spdsAllocatableClassOrdinal<T>];
+            SpdsPtr<void>& freelist = m_spdsExecutionThreadFreeList[x_spdsAllocatableClassOrdinal<T>];
 
             UnalignedStore<int32_t>(object, freelist.m_value);
             freelist = GetHeapPtrTranslator().TranslateToSpdsPtr<void>(object);
@@ -681,66 +358,11 @@ public:
         }
     }
 
-    // Create a string by concatenating start[0] ~ start[len-1]
-    // Each TValue must be a string
-    //
-    UserHeapPointer<HeapString> WARN_UNUSED CreateStringObjectFromConcatenation(TValue* start, size_t len);
-
-    // Create a string by concatenating start[0] ~ start[len-1]
-    // Each item is a string described by <ptr, len>
-    //
-    UserHeapPointer<HeapString> WARN_UNUSED CreateStringObjectFromConcatenation(std::pair<const void*, size_t>* start, size_t len);
-
-    // Create a string by concatenating str1 .. start[0] ~ start[len-1]
-    // str1 and each TValue must be a string
-    //
-    UserHeapPointer<HeapString> WARN_UNUSED CreateStringObjectFromConcatenation(UserHeapPointer<HeapString> str1, TValue* start, size_t len);
-    UserHeapPointer<HeapString> WARN_UNUSED CreateStringObjectFromRawString(const void* str, uint32_t len);
-
-    HeapPtr<HeapString> WARN_UNUSED CreateStringObjectFromRawCString(const char* str)
-    {
-        return CreateStringObjectFromRawString(str, static_cast<uint32_t>(strlen(str))).As();
-    }
-
-    // Create a string by concatenating n copies of 'str'
-    //
-    UserHeapPointer<HeapString> WARN_UNUSED CreateStringObjectFromConcatenationOfSameString(const char* ptr, uint32_t len, size_t n);
-
-    uint32_t GetGlobalStringHashConserCurrentHashTableSize() const
-    {
-        return m_hashTableSizeMask + 1;
-    }
-
-    uint32_t GetGlobalStringHashConserCurrentElementCount() const
-    {
-        return m_elementCount;
-    }
-
-    UserHeapPointer<HeapString> GetSpecialKeyForMetadataSlot()
-    {
-        return m_specialKeyForMetatableSlot;
-    }
-
-    UserHeapPointer<HeapString> GetSpecialKeyForBoolean(bool v)
-    {
-        return m_specialKeyForBooleanIndex[static_cast<size_t>(v)];
-    }
-
-    static constexpr size_t OffsetofSpecialKeyForBooleanIndex()
-    {
-        return offsetof_member_v<&VM::m_specialKeyForBooleanIndex>;
-    }
-
     FILE* WARN_UNUSED GetStdout() { return m_filePointerForStdout; }
     FILE* WARN_UNUSED GetStderr() { return m_filePointerForStderr; }
 
     void RedirectStdout(FILE* newStdout) { m_filePointerForStdout = newStdout; }
     void RedirectStderr(FILE* newStderr) { m_filePointerForStderr = newStderr; }
-
-    std::array<SystemHeapPointer<Structure>, x_numInlineCapacitySteppings>& GetInitialStructureForDifferentInlineCapacityArray()
-    {
-        return m_initialStructureForDifferentInlineCapacity;
-    }
 
     CoroutineRuntimeContext* GetRootCoroutine()
     {
@@ -754,116 +376,7 @@ public:
         return *reinterpret_cast<HeapPtr<T>>(offset);
     }
 
-    HeapPtr<TableObject> GetRootGlobalObject();
-
-    // The VM structure also stores several 'true' library functions that doesn't change even if the respective user-exposed
-    // global value is overwritten.
-    // This is mainly a convenience feature, as use of this feature could have been avoided by using upvalues instead,
-    // but by not using upvalue, our global environment initialization logic can be simpler.
-    //
-    enum class LibFn
-    {
-        BaseNext,
-        BaseError,
-        BaseIPairsIter,
-        BaseToString,
-        BaseLoad,
-        IoLinesIter,
-        // A special object denoting that the 'is_next' validation of a key-value for-loop has passed
-        //
-        BaseNextValidationOk,
-        // must be last member
-        //
-        X_END_OF_ENUM
-    };
-
-    enum class LibFnProto
-    {
-        CoroutineWrapCall,
-        // must be last member
-        //
-        X_END_OF_ENUM
-    };
-
-    template<LibFn fn>
-    void ALWAYS_INLINE InitializeLibFn(TValue val)
-    {
-        static_assert(fn != LibFn::X_END_OF_ENUM);
-        Assert(val.Is<tFunction>() || val.Is<tTable>());
-        m_vmLibFunctionObjects[static_cast<size_t>(fn)] = val;
-    }
-
-    template<LibFn fn>
-    TValue WARN_UNUSED ALWAYS_INLINE GetLibFn()
-    {
-        static_assert(fn != LibFn::X_END_OF_ENUM);
-        return m_vmLibFunctionObjects[static_cast<size_t>(fn)];
-    }
-
-    template<LibFnProto fn>
-    void ALWAYS_INLINE InitializeLibFnProto(SystemHeapPointer<ExecutableCode> val)
-    {
-        static_assert(fn != LibFnProto::X_END_OF_ENUM);
-        m_vmLibFnProtos[static_cast<size_t>(fn)] = val;
-    }
-
-    template<LibFnProto fn>
-    SystemHeapPointer<ExecutableCode> WARN_UNUSED ALWAYS_INLINE GetLibFnProto()
-    {
-        static_assert(fn != LibFnProto::X_END_OF_ENUM);
-        return m_vmLibFnProtos[static_cast<size_t>(fn)];
-    }
-
-    UserHeapPointer<HeapString> GetStringNameForMetatableKind(LuaMetamethodKind kind)
-    {
-        return m_stringNameForMetatableKind[static_cast<size_t>(kind)];
-    }
-
-    // return -1 if not found, otherwise return the corresponding LuaMetamethodKind
-    //
-    int WARN_UNUSED GetMetamethodOrdinalFromStringName(HeapPtr<HeapString> stringName)
-    {
-        int ord = GetLuaMetamethodOrdinalFromStringHash(stringName->m_hashHigh);
-        if (likely(ord == -1))
-        {
-            return -1;
-        }
-        Assert(static_cast<size_t>(ord) < x_totalLuaMetamethodKind);
-        if (likely(m_stringNameForMetatableKind[static_cast<size_t>(ord)] == stringName))
-        {
-            return ord;
-        }
-        return -1;
-    }
-
-    static std::mt19937* WARN_UNUSED ALWAYS_INLINE GetUserPRNG()
-    {
-        constexpr size_t offset = offsetof_member_v<&VM::m_usrPRNG>;
-        using T = typeof_member_t<&VM::m_usrPRNG>;
-        std::mt19937* res = *reinterpret_cast<HeapPtr<T>>(offset);
-        if (likely(res != nullptr))
-        {
-            return res;
-        }
-        return GetUserPRNGSlow();
-    }
-
-    static constexpr size_t OffsetofStringNameForMetatableKind()
-    {
-        return offsetof_member_v<&VM::m_stringNameForMetatableKind>;
-    }
-
-    static HeapPtr<TValue> ALWAYS_INLINE VM_LibFnArrayAddr()
-    {
-        return reinterpret_cast<HeapPtr<TValue>>(offsetof_member_v<&VM::m_vmLibFunctionObjects>);
-    }
-
-    static HeapPtr<HeapString> ALWAYS_INLINE VM_GetEmptyString()
-    {
-        constexpr size_t offset = offsetof_member_v<&VM::m_emptyString>;
-        using T = typeof_member_t<&VM::m_emptyString>;
-        return *reinterpret_cast<HeapPtr<T>>(offset);
-    }
+    HeapPtr<void> GetRootGlobalObject() { return nullptr; }
 
     std::pair<TValue* /*retStart*/, uint64_t /*numRet*/> LaunchScript(ScriptModule* module);
 
@@ -925,6 +438,9 @@ public:
     uint32_t GetNumTotalBaselineJitCompilations() { return m_totalBaselineJitCompilations; }
     void IncrementNumTotalBaselineJitCompilations() { m_totalBaselineJitCompilations++; }
 
+    SOMObject* GetInternedString(size_t ord);
+    SOMObject* GetInternedSymbol(size_t ord);
+
     static constexpr size_t x_pageSize = 4096;
 
 private:
@@ -981,55 +497,7 @@ private:
     //
     int32_t WARN_UNUSED SpdsAllocatePageSlowPathImpl();
 
-    // In Lua all strings are hash-consed
-    // The global string conser implementation
-    //
-
-    // The hash table stores GeneralHeapPointer
-    // We know that they must be UserHeapPointer, so the below values should never appear as valid values
-    //
-    static constexpr int32_t x_stringConserHtNonexistentValue = 0;
-    static constexpr int32_t x_stringConserHtDeletedValue = 4;
-
-    static bool WARN_UNUSED StringHtCellValueIsNonExistentOrDeleted(GeneralHeapPointer<HeapString> ptr)
-    {
-        AssertIff(ptr.m_value >= 0, ptr.m_value == x_stringConserHtNonexistentValue || ptr.m_value == x_stringConserHtDeletedValue);
-        return ptr.m_value >= 0;
-    }
-
-    static bool WARN_UNUSED StringHtCellValueIsNonExistent(GeneralHeapPointer<HeapString> ptr)
-    {
-        return ptr.m_value == x_stringConserHtNonexistentValue;
-    }
-
-    // max load factor is x_stringht_loadfactor_numerator / (2^x_stringht_loadfactor_denominator_shift)
-    //
-    static constexpr uint32_t x_stringht_loadfactor_denominator_shift = 1;
-    static constexpr uint32_t x_stringht_loadfactor_numerator = 1;
-
-    static void ReinsertDueToResize(GeneralHeapPointer<HeapString>* hashTable, uint32_t hashTableSizeMask, GeneralHeapPointer<HeapString> e);
-
-    // TODO: when we have GC thread we need to figure out how this interacts with GC
-    //
-    void ExpandStringConserHashTableIfNeeded();
-
-    // Insert an abstract multi-piece string into the hash table if it does not exist
-    // Return the HeapString
-    //
-    template<typename Iterator>
-    UserHeapPointer<HeapString> WARN_UNUSED InsertMultiPieceString(Iterator iterator);
-
-    static std::mt19937* WARN_UNUSED NO_INLINE GetUserPRNGSlow()
-    {
-        VM* vm = VM::GetActiveVMForCurrentThread();
-        Assert(vm->m_usrPRNG == nullptr);
-        vm->m_usrPRNG = new std::mt19937();
-        return vm->m_usrPRNG;
-    }
-
     bool WARN_UNUSED InitializeVMBase();
-    bool WARN_UNUSED InitializeVMStringManager();
-    void CleanupVMStringManager();
     bool WARN_UNUSED InitializeVMGlobalData();
     bool WARN_UNUSED Initialize();
     void Cleanup();
@@ -1078,38 +546,7 @@ private:
     std::atomic<uint64_t> m_spdsPageFreeList;
     int32_t m_spdsPageAllocLimit;
 
-    alignas(64) SpdsAllocImpl<VM, false /*isTempAlloc*/> m_compilerThreadSpdsAlloc;
-
-    SpdsPtr<void> m_spdsCompilerThreadFreeList[x_numSpdsAllocatableClassNotUsingLfFreelist];
-
-    uint32_t m_hashTableSizeMask;
-    uint32_t m_elementCount;
-    // use GeneralHeapPointer because it's 4 bytes
-    // All pointers are actually always HeapPtr<HeapString>
-    //
-    GeneralHeapPointer<HeapString>* m_hashTable;
-
-    // In PolyMetatable mode, the metatable is stored in a property slot
-    // For simplicity, we always assign this special key (which is used exclusively for this purpose) to this slot
-    //
-    UserHeapPointer<HeapString> m_specialKeyForMetatableSlot;
-
-    // These two special keys are used for 'false' and 'true' respectively
-    //
-    UserHeapPointer<HeapString> m_specialKeyForBooleanIndex[2];
-
     CoroutineRuntimeContext* m_rootCoroutine;
-
-    std::array<UserHeapPointer<HeapString>, x_totalLuaMetamethodKind> m_stringNameForMetatableKind;
-
-    std::array<SystemHeapPointer<Structure>, x_numInlineCapacitySteppings> m_initialStructureForDifferentInlineCapacity;
-
-    TValue m_vmLibFunctionObjects[static_cast<size_t>(LibFn::X_END_OF_ENUM)];
-    SystemHeapPointer<ExecutableCode> m_vmLibFnProtos[static_cast<size_t>(LibFnProto::X_END_OF_ENUM)];
-
-    // The PRNG exposed to the user program. Internal VM logic must not use this PRNG.
-    //
-    std::mt19937* m_usrPRNG;
 
     // Allow unit test to hook stdout and stderr to a custom temporary file
     //
@@ -1117,52 +554,166 @@ private:
     FILE* m_filePointerForStderr;
 
 public:
-    // Per-type Lua metatables
-    //
-    UserHeapPointer<void> m_metatableForNil;
-    UserHeapPointer<void> m_metatableForBoolean;
-    UserHeapPointer<void> m_metatableForNumber;
-    UserHeapPointer<void> m_metatableForString;
-    UserHeapPointer<void> m_metatableForFunction;
-    UserHeapPointer<void> m_metatableForCoroutine;
+    StringInterner m_interner;
+    std::vector<SOMObject*> m_internedStringObjects;
+    std::vector<SOMObject*> m_internedSymbolObjects;
+    std::unordered_map<size_t, SOMClass*> m_parsedClasses;
+    std::unordered_map<size_t /*internStringOrd*/, size_t /*idx*/> m_globalIdxMap;
+    std::vector<size_t> m_globalStringIdWithIndex;
+    std::vector<TValue> m_globalsVec;
+    TValue* m_somGlobals;
 
-    // The string ""
-    //
-    HeapPtr<HeapString> m_emptyString;
+    bool WARN_UNUSED GetSlotForGlobalNoCreate(std::string_view globalName, size_t& res /*out*/)
+    {
+        size_t ord = m_interner.InternString(globalName);
+        auto it = m_globalIdxMap.find(ord);
+        if (it == m_globalIdxMap.end()) { return false; }
+        res = it->second;
+        return true;
+    }
 
-    // The string 'tostring'
+    // Creates a slot if not exist
     //
-    UserHeapPointer<HeapString> m_toStringString;
+    size_t WARN_UNUSED GetSlotForGlobal(std::string_view globalName)
+    {
+        size_t ord = m_interner.InternString(globalName);
+        auto it = m_globalIdxMap.find(ord);
+        if (it == m_globalIdxMap.end())
+        {
+            m_globalsVec.push_back(TValue::CreateImpossibleValue());
+            m_somGlobals = m_globalsVec.data();
+            m_globalIdxMap[ord] = m_globalsVec.size() - 1;
+            m_globalStringIdWithIndex.push_back(ord);
+            return m_globalsVec.size() - 1;
+        }
+        else
+        {
+            return it->second;
+        }
+    }
 
-    // The string '__tostring'
-    //
-    UserHeapPointer<HeapString> m_stringNameForToStringMetamethod;
+    static TValue VM_GetGlobal(uint16_t idx)
+    {
+        TestAssert(idx < VM_GetActiveVMForCurrentThread()->m_globalsVec.size());
+        TestAssert(VM_GetActiveVMForCurrentThread()->m_globalsVec.data() == VM_GetActiveVMForCurrentThread()->m_somGlobals);
+        TValue* vec = *reinterpret_cast<HeapPtr<TValue*>>(offsetof_member_v<&VM::m_somGlobals>);
+        return vec[idx];
+    }
 
-    // In Lua, the 'string' type initially has a non-nil metatable. This is the only per-type metatable that exists by default in Lua.
-    // This value records the initial hidden class for 'm_metatableForString', which allows us to quickly rule out existence
-    // of certain fields in that metatable. (Specifically, if the hidden class has not been changed, then we know for sure that
-    // the only string field in the metatable is '__index').
+    // Hidden classes for various system classes, non-boxed types and function types
     //
-    SystemHeapPointer<void> m_initialHiddenClassOfMetatableForString;
+    HeapPtr<SOMClass> m_stringHiddenClass;
+    HeapPtr<SOMClass> m_arrayHiddenClass;
+    HeapPtr<SOMClass> m_objectClass;
+    HeapPtr<SOMClass> m_classClass;
+    HeapPtr<SOMClass> m_metaclassClass;
+    HeapPtr<SOMClass> m_nilClass;
+    HeapPtr<SOMClass> m_booleanClass;
+    HeapPtr<SOMClass> m_trueClass;
+    HeapPtr<SOMClass> m_falseClass;
+    HeapPtr<SOMClass> m_integerClass;
+    HeapPtr<SOMClass> m_doubleClass;
+    HeapPtr<SOMClass> m_blockClass;
+    HeapPtr<SOMClass> m_block1Class;
+    HeapPtr<SOMClass> m_block2Class;
+    HeapPtr<SOMClass> m_block3Class;
+    HeapPtr<SOMClass> m_methodClass;
+    HeapPtr<SOMClass> m_symbolClass;
+    HeapPtr<SOMClass> m_primitiveClass;
+    HeapPtr<SOMClass> m_systemClass;
+
+    bool m_metaclassClassLoaded;
+
+    SOMUniquedString m_unknownGlobalHandler;
+    SOMUniquedString m_doesNotUnderstandHandler;
+    SOMUniquedString m_escapedBlockHandler;
+
+    SOMPrimitivesContainer m_somPrimitives;
+    PerfTimer m_vmStartTime;
+
+#ifdef ENABLE_SOM_PROFILE_FREQUENCY
+    size_t WARN_UNUSED GetMethodIndexForFrequencyProfiling(std::string_view className, std::string_view methName, bool isClassSide)
+    {
+        size_t& it = m_methCallCountIdxMap[static_cast<size_t>(isClassSide)][std::string(className)][std::string(methName)];
+        if (it == 0)
+        {
+            m_methCallCounts.push_back(0);
+            m_methCallCountArr = m_methCallCounts.data();
+            it = m_methCallCounts.size();
+        }
+        TestAssert(1 <= it && it <= m_methCallCounts.size());
+        return it - 1;
+    }
+
+    void NO_INLINE IncrementPrimitiveFuncCallCount(std::string_view str)
+    {
+        m_primMethCounts[std::string(str)]++;
+    }
+
+    void PrintSOMFunctionFrequencyProfile()
+    {
+        std::vector<std::pair<int64_t /*negCount*/, std::string /*name*/>> allEntries;
+        std::vector<bool> idxShowedUp;
+        idxShowedUp.resize(m_methCallCounts.size(), false);
+        for (bool isClassSide : { false, true })
+        {
+            for (auto& classIt : m_methCallCountIdxMap[static_cast<size_t>(isClassSide)])
+            {
+                std::string_view className = classIt.first;
+                for (auto& methIt : classIt.second)
+                {
+                    std::string_view methName = methIt.first;
+                    size_t idx = methIt.second - 1;
+                    TestAssert(idx < m_methCallCounts.size());
+                    TestAssert(!idxShowedUp[idx]);
+                    idxShowedUp[idx] = true;
+                    size_t count = m_methCallCounts[idx];
+                    if (count > 0)
+                    {
+                        std::string desc = std::string(className) + "." + std::string(methName);
+                        if (isClassSide) { desc += " [ClassSide]"; }
+                        allEntries.push_back(std::make_pair(-static_cast<int64_t>(count), desc));
+                    }
+                }
+            }
+        }
+        for (bool value : idxShowedUp) { TestAssert(value); std::ignore = value; }
+
+        for (auto& it : m_primMethCounts)
+        {
+            if (it.second > 0)
+            {
+                allEntries.push_back(std::make_pair(-static_cast<int64_t>(it.second), std::string(it.first) + " [Prim]"));
+            }
+        }
+
+        std::sort(allEntries.begin(), allEntries.end());
+
+        size_t totalCnts = 0;
+        for (auto& it : allEntries) { totalCnts += static_cast<size_t>(-it.first); }
+
+        fprintf(stderr, "========= SOM function frequency stats =========\n");
+        fprintf(stderr, "    Freq Name\n");
+        size_t printedCnts = 0;
+        size_t numToPrint = 30;
+        numToPrint = std::min(numToPrint, allEntries.size());
+        for (size_t i = 0; i < numToPrint; i++)
+        {
+            size_t cnt = static_cast<size_t>(-allEntries[i].first);
+            printedCnts += cnt;
+            fprintf(stderr, "%8llu %s\n", static_cast<unsigned long long>(cnt), allEntries[i].second.c_str());
+        }
+        fprintf(stderr, "Long tail: %llu functions accounting for %.1lf%% (%llu) of all calls (%llu) omitted.\n",
+                static_cast<unsigned long long>(allEntries.size() - numToPrint),
+                100.0 * static_cast<double>(totalCnts - printedCnts) / static_cast<double>(totalCnts),
+                static_cast<unsigned long long>(totalCnts - printedCnts),
+                static_cast<unsigned long long>(totalCnts));
+    }
+
+    std::unordered_map<std::string /*className*/, std::unordered_map<std::string /*methName*/, size_t /*idx+1*/>> m_methCallCountIdxMap[2];
+    std::vector<size_t> m_methCallCounts;
+    size_t* m_methCallCountArr;
+    std::unordered_map<std::string, size_t /*count*/> m_primMethCounts;
+#endif  // ifdef ENABLE_SOM_PROFILE_FREQUENCY
 };
-
-inline UserHeapPointer<HeapString> VM_GetSpecialKeyForBoolean(bool v)
-{
-    constexpr size_t offset = VM::OffsetofSpecialKeyForBooleanIndex();
-    return TCGet(reinterpret_cast<HeapPtr<UserHeapPointer<HeapString>>>(offset)[static_cast<size_t>(v)]);
-}
-
-inline UserHeapPointer<HeapString> VM_GetStringNameForMetatableKind(LuaMetamethodKind kind)
-{
-    constexpr size_t offset = VM::OffsetofStringNameForMetatableKind();
-    return TCGet(reinterpret_cast<HeapPtr<UserHeapPointer<HeapString>>>(offset)[static_cast<size_t>(kind)]);
-}
-
-template<VM::LibFn fn>
-inline TValue ALWAYS_INLINE VM_GetLibFunctionObject()
-{
-    static_assert(fn != VM::LibFn::X_END_OF_ENUM);
-    HeapPtr<TValue> arrayStart = VM::VM_LibFnArrayAddr();
-    return TCGet(arrayStart[static_cast<size_t>(fn)]);
-}
 

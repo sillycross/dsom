@@ -253,6 +253,15 @@ bool WARN_UNUSED ALWAYS_INLINE UnsafeFloatEqual(T a, T b)
 }
 
 template<typename T>
+bool WARN_UNUSED ALWAYS_INLINE UnsafeFloatUnequal(T a, T b)
+{
+    static_assert(std::is_floating_point_v<T>);
+    SUPRESS_FLOAT_EQUAL_WARNING(
+        return a != b;
+    )
+}
+
+template<typename T>
 bool WARN_UNUSED ALWAYS_INLINE IsNaN(T a)
 {
     static_assert(std::is_floating_point_v<T>);

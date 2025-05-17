@@ -2,21 +2,7 @@
 #include "deegen_api.h"
 
 #include "runtime_utils.h"
-
-static void NO_RETURN ReturnNoneImpl()
-{
-    GuestLanguageFunctionReturn();
-}
-
-DEEGEN_DEFINE_BYTECODE(Ret0)
-{
-    Operands();
-    Result(NoOutput);
-    Implementation(ReturnNoneImpl);
-    Variant();
-    DfgVariant();
-    DeclareAsIntrinsic<Intrinsic::FunctionReturn0>({});
-}
+#include "vm.h"
 
 static void NO_RETURN ReturnImpl(const TValue* retStart, uint16_t numRet)
 {
@@ -31,13 +17,7 @@ DEEGEN_DEFINE_BYTECODE(Ret)
     );
     Result(NoOutput);
     Implementation(ReturnImpl);
-    Variant(Op("numRet").HasValue(0));
     Variant(Op("numRet").HasValue(1));
-    Variant(Op("numRet").HasValue(2));
-    Variant(Op("numRet").HasValue(3));
-    Variant(Op("numRet").HasValue(4));
-    Variant(Op("numRet").HasValue(5));
-    Variant();
     DfgVariant();
     DeclareReads(Range(Op("retStart"), Op("numRet")));
     DeclareAsIntrinsic<Intrinsic::FunctionReturn>({
@@ -46,34 +26,29 @@ DEEGEN_DEFINE_BYTECODE(Ret)
     });
 }
 
-static void NO_RETURN ReturnAppendingVariadicResultsImpl(const TValue* retStart, uint16_t numRet)
+#ifdef ENABLE_SOM_PROFILE_FREQUENCY
+
+static void NO_RETURN ProfileFrequencyImpl(TValue value)
 {
-    GuestLanguageFunctionReturnAppendingVariadicResults(retStart, numRet);
+    Assert(value.Is<tInt32>());
+    int32_t idx = value.As<tInt32>();
+    Assert(idx >= 0);
+    VM* vm = VM::GetActiveVMForCurrentThread();
+    vm->m_methCallCountArr[idx]++;
+    Return();
 }
 
-DEEGEN_DEFINE_BYTECODE(RetM)
+DEEGEN_DEFINE_BYTECODE(SOMProfileCallFreq)
 {
     Operands(
-        BytecodeRangeBaseRO("retStart"),
-        Literal<uint16_t>("numRet")
+        Constant("idx")
     );
     Result(NoOutput);
-    Implementation(ReturnAppendingVariadicResultsImpl);
-    Variant(Op("numRet").HasValue(0));
-    Variant(Op("numRet").HasValue(1));
-    Variant(Op("numRet").HasValue(2));
-    Variant(Op("numRet").HasValue(3));
-    Variant(Op("numRet").HasValue(4));
+    Implementation(ProfileFrequencyImpl);
     Variant();
     DfgVariant();
-    DeclareReads(
-        Range(Op("retStart"), Op("numRet")),
-        VariadicResults()
-    );
-    DeclareAsIntrinsic<Intrinsic::FunctionReturnAppendingVarRet>({
-        .start = Op("retStart"),
-        .length = Op("numRet")
-    });
 }
+
+#endif  // ifdef ENABLE_SOM_PROFILE_FREQUENCY
 
 DEEGEN_END_BYTECODE_DEFINITIONS

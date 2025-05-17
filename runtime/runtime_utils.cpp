@@ -1,7 +1,6 @@
 #include "runtime_utils.h"
 #include "deegen_options.h"
 #include "vm.h"
-#include "table_object.h"
 #include "deegen_enter_vm_from_c.h"
 
 #include "generated/get_guest_language_function_interpreter_entry_point.h"
@@ -11,82 +10,12 @@
 
 const size_t x_num_bytecode_metadata_struct_kinds_ = x_num_bytecode_metadata_struct_kinds;
 
-TValue WARN_UNUSED MakeErrorMessage(const char* msg)
-{
-    return TValue::CreatePointer(VM::GetActiveVMForCurrentThread()->CreateStringObjectFromRawString(msg, static_cast<uint32_t>(strlen(msg))));
-}
-
-TValue WARN_UNUSED MakeErrorMessageForUnableToCall(TValue badValue)
-{
-    // The Lua message is "attmpt to call a (type of badValue) value"
-    //
-    char msg[100];
-    auto makeMsg = [&](const char* ty)
-    {
-        snprintf(msg, 100, "attempt to call a %s value", ty);
-    };
-    auto makeMsg2 = [&](int d)
-    {
-        snprintf(msg, 100, "attempt to call a (internal type %d) value", d);
-    };
-
-    if (badValue.IsInt32())
-    {
-        makeMsg("number");
-    }
-    else if (badValue.IsDouble())
-    {
-        makeMsg("number");
-    }
-    else if (badValue.IsMIV())
-    {
-        MiscImmediateValue miv = badValue.AsMIV();
-        if (miv.IsNil())
-        {
-            makeMsg("nil");
-        }
-        else
-        {
-            Assert(miv.IsBoolean());
-            makeMsg("boolean");
-        }
-    }
-    else
-    {
-        Assert(badValue.IsPointer());
-        UserHeapGcObjectHeader* p = TranslateToRawPointer(badValue.AsPointer<UserHeapGcObjectHeader>().As());
-        if (p->m_type == HeapEntityType::String)
-        {
-            makeMsg("string");
-        }
-        else if (p->m_type == HeapEntityType::Function)
-        {
-            makeMsg("function");
-        }
-        else if (p->m_type == HeapEntityType::Table)
-        {
-            makeMsg("table");
-        }
-        else if (p->m_type == HeapEntityType::Thread)
-        {
-            makeMsg("thread");
-        }
-        else
-        {
-            // TODO: handle userdata type
-            //
-            makeMsg2(static_cast<int>(p->m_type));
-        }
-    }
-    return MakeErrorMessage(msg);
-}
-
 void* WARN_UNUSED UnlinkedCodeBlock::GetInterpreterEntryPoint()
 {
     return generated::GetGuestLanguageFunctionEntryPointForInterpreter(m_hasVariadicArguments, m_numFixedArguments);
 }
 
-CodeBlock* WARN_UNUSED CodeBlock::Create(VM* vm, UnlinkedCodeBlock* ucb, UserHeapPointer<TableObject> globalObject)
+CodeBlock* WARN_UNUSED CodeBlock::Create(VM* vm, UnlinkedCodeBlock* ucb, UserHeapPointer<void> globalObject)
 {
     Assert(ucb->m_bytecodeMetadataLength % 8 == 0);
     size_t sizeToAllocate = GetTrailingArrayOffset() + ucb->m_bytecodeMetadataLength + sizeof(TValue) * ucb->m_cstTableLength + RoundUpToMultipleOf<8>(ucb->m_bytecodeLengthIncludingTailPadding);
@@ -108,6 +37,7 @@ CodeBlock* WARN_UNUSED CodeBlock::Create(VM* vm, UnlinkedCodeBlock* ucb, UserHea
     cb->m_bytecodeMetadataLength = ucb->m_bytecodeMetadataLength;
     cb->m_baselineCodeBlock = nullptr;
     cb->m_dfgCodeBlock = nullptr;
+    cb->m_fnTyMask  = static_cast<uint8_t>(static_cast<uint8_t>(ucb->m_fnKind) + 16 * static_cast<uint8_t>(ucb->m_trivialFnType));
     if (vm->InterpreterCanTierUpFurther())
     {
         cb->m_interpreterTierUpCounter = x_interpreter_tier_up_threshold_bytecode_length_multiplier * ucb->m_bytecodeLengthIncludingTailPadding;
@@ -260,7 +190,7 @@ FunctionObject* WARN_UNUSED NO_INLINE FunctionObject::CreateForDfgAndFillUpvalue
     return r;
 }
 
-CoroutineRuntimeContext* CoroutineRuntimeContext::Create(VM* vm, UserHeapPointer<TableObject> globalObject, size_t numStackSlots)
+CoroutineRuntimeContext* CoroutineRuntimeContext::Create(VM* vm, UserHeapPointer<void> globalObject, size_t numStackSlots)
 {
     CoroutineRuntimeContext* r = TranslateToRawPointer(vm, vm->AllocFromUserHeap(static_cast<uint32_t>(sizeof(CoroutineRuntimeContext))).AsNoAssert<CoroutineRuntimeContext>());
     UserHeapGcObjectHeader::Populate(r);

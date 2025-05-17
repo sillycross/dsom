@@ -1,0 +1,5 @@
+Hello = (
+  run = (
+    'Hello World!' println.
+  )
+)

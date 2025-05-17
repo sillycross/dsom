@@ -68,21 +68,29 @@ DEEGEN_DEFINE_BYTECODE(UpvaluePut)
     });
 }
 
+template<bool shouldBranch>
 static void NO_RETURN UpvalueCloseImpl(const TValue* base)
 {
     UpvalueAccessor::Close(base);
-    ReturnAndBranch();
+    if constexpr(shouldBranch)
+    {
+        ReturnAndBranch();
+    }
+    else
+    {
+        Return();
+    }
 }
 
 // UpvalueClose performs a jump. 'isLoopHint' hints whether this jump is a loop back edge.
 //
-DEEGEN_DEFINE_BYTECODE_TEMPLATE(UpvalueCloseOperation, bool isLoopHint)
+DEEGEN_DEFINE_BYTECODE_TEMPLATE(UpvalueCloseOperation, bool shouldBranch, bool isLoopHint)
 {
     Operands(
         BytecodeRangeBaseRO("base")
     );
-    Result(ConditionalBranch);
-    Implementation(UpvalueCloseImpl);
+    Result(shouldBranch ? ConditionalBranch : NoOutput);
+    Implementation(UpvalueCloseImpl<shouldBranch>);
     CheckForInterpreterTierUp(isLoopHint);
     Variant();
     DfgVariant();
@@ -92,7 +100,8 @@ DEEGEN_DEFINE_BYTECODE_TEMPLATE(UpvalueCloseOperation, bool isLoopHint)
     });
 }
 
-DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(UpvalueClose, UpvalueCloseOperation, false /*isLoopHint*/);
-DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(UpvalueCloseLoopHint, UpvalueCloseOperation, true /*isLoopHint*/);
+DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(UpvalueClose, UpvalueCloseOperation, false /*shouldBranch*/, false /*isLoopHint*/);
+DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(UpvalueCloseBranch, UpvalueCloseOperation, true /*shouldBranch*/, false /*isLoopHint*/);
+DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(UpvalueCloseLoopHint, UpvalueCloseOperation, true /*shouldBranch*/, true /*isLoopHint*/);
 
 DEEGEN_END_BYTECODE_DEFINITIONS
