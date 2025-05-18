@@ -11,8 +11,8 @@ using namespace dast;
 
 // If the function takes <= threshold fixed parameters, it will use the specialized implementation
 //
-constexpr size_t x_specializeThresholdForNonVarargsFunction = 6;
-constexpr size_t x_specializeThresholdForVarargsFunction = 6;
+constexpr size_t x_specializeThresholdForNonVarargsFunction = x_use_som_call_semantics ? 0 : 6;
+constexpr size_t x_specializeThresholdForVarargsFunction = x_use_som_call_semantics ? 0 : 6;
 
 struct GeneratorContext
 {
@@ -87,6 +87,10 @@ struct GeneratorContext
         fprintf(fp, "extern const std::array<void(*)(), %d> x_interpreterEntryFuncListVa;\n", static_cast<int>(vaNames.size() + 1));
 
         fprintf(fp, "\nvoid* WARN_UNUSED GetGuestLanguageFunctionEntryPointForInterpreter(bool takeVarArgs, size_t numFixedParams) {\n");
+        fprintf(fp, "    if (x_use_som_call_semantics) {\n");
+        fprintf(fp, "        TestAssert(!takeVarArgs);\n");
+        fprintf(fp, "        return reinterpret_cast<void*>(x_interpreterEntryFuncListNoVa[x_interpreterEntryFuncListNoVa.size() - 1]);\n");
+        fprintf(fp, "    }\n");
         fprintf(fp, "    if (takeVarArgs) {\n");
         fprintf(fp, "        return reinterpret_cast<void*>(x_interpreterEntryFuncListVa[std::min(numFixedParams, x_interpreterEntryFuncListVa.size() - 1)]);\n");
         fprintf(fp, "    } else {\n");

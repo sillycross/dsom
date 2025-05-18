@@ -664,13 +664,22 @@ void DfgBuiltinNodeImplReturn_Ret1::GenerateImpl(DfgBuiltinNodeImplCreator* impl
 
     uint64_t nilValue = TValue::Create<tNil>().m_value;
 
-    for (size_t i = 1; i < x_minNilFillReturnValues; i++)
+    Value* numRet = CreateLLVMConstantInt<uint64_t>(ctx, 1 /*value*/);
+    if (!x_use_som_call_semantics)
     {
-        Value* addr = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), retStart, { CreateLLVMConstantInt<uint64_t>(ctx, i) }, "", bb);
-        new StoreInst(CreateLLVMConstantInt<uint64_t>(ctx, nilValue), addr, bb);
+        for (size_t i = 1; i < x_min_nil_fill_return_values; i++)
+        {
+            Value* addr = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), retStart, { CreateLLVMConstantInt<uint64_t>(ctx, i) }, "", bb);
+            new StoreInst(CreateLLVMConstantInt<uint64_t>(ctx, nilValue), addr, bb);
+        }
+    }
+    else
+    {
+        retStart = new LoadInst(llvm_type_of<void*>(ctx), retStart, "", false /*isVolatile*/, Align(8), bb);
+        numRet = UndefValue::get(llvm_type_of<uint64_t>(ctx));
     }
 
-    impl->CreateDispatchForGuestLanguageFunctionReturn(retStart, CreateLLVMConstantInt<uint64_t>(ctx, 1 /*value*/), bb);
+    impl->CreateDispatchForGuestLanguageFunctionReturn(retStart, numRet , bb);
 }
 
 void DfgBuiltinNodeImplReturn_Ret0::GenerateImpl(DfgBuiltinNodeImplCreator* impl)
@@ -685,7 +694,7 @@ void DfgBuiltinNodeImplReturn_Ret0::GenerateImpl(DfgBuiltinNodeImplCreator* impl
     Value* stackBase = funcCtx->GetValueAtEntry<RPV_StackBase>();
 
     uint64_t nilValue = TValue::Create<tNil>().m_value;
-    for (size_t i = 0; i < x_minNilFillReturnValues; i++)
+    for (size_t i = 0; i < x_min_nil_fill_return_values; i++)
     {
         Value* addr = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), stackBase, { CreateLLVMConstantInt<uint64_t>(ctx, i) }, "", bb);
         new StoreInst(CreateLLVMConstantInt<uint64_t>(ctx, nilValue), addr, bb);

@@ -88,33 +88,42 @@ void AstReturnValueAccessor::DoLoweringForInterpreterOrBaselineOrDfg(DeegenBytec
         ReleaseAssert(m_origin->arg_size() == 1);
         Value* ord = m_origin->getArgOperand(0);
         ReleaseAssert(llvm_value_has_type<size_t>(ord));
-        bool canDoQuickLoad = false;
-        if (isa<Constant>(ord))
-        {
-            uint64_t ordVal = GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(ord));
-            if (ordVal < x_minNilFillReturnValues)
-            {
-                // The callee is responsible to fill nil at this position even if there are less return values. So we can load directly.
-                //
-                canDoQuickLoad = true;
-            }
-        }
         Instruction* result;
-        if (canDoQuickLoad)
+        if (x_use_som_call_semantics)
         {
-            GetElementPtrInst* gep = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), ifi->GetRetStart(), { ord }, "", m_origin);
-            result = new LoadInst(llvm_type_of<uint64_t>(ctx), gep, "", m_origin);
+            ReleaseAssert(isa<Constant>(ord) && GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(ord)) == 0);
+            result = new PtrToIntInst(ifi->GetRetVal(), llvm_type_of<uint64_t>(ctx), "", m_origin);
         }
         else
         {
-            result = ifi->CallDeegenCommonSnippet(
-                "GetReturnValueAtSpecifiedOrdinal",
+            bool canDoQuickLoad = false;
+            if (isa<Constant>(ord))
+            {
+                uint64_t ordVal = GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(ord));
+                if (ordVal < x_min_nil_fill_return_values)
                 {
-                    ifi->GetRetStart(),
-                    ifi->GetNumRet(),
-                    ord
-                },
-                m_origin);
+                    // The callee is responsible to fill nil at this position even if there are less return values. So we can load directly.
+                    //
+                    canDoQuickLoad = true;
+                }
+            }
+
+            if (canDoQuickLoad)
+            {
+                GetElementPtrInst* gep = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), ifi->GetRetStart(), { ord }, "", m_origin);
+                result = new LoadInst(llvm_type_of<uint64_t>(ctx), gep, "", m_origin);
+            }
+            else
+            {
+                result = ifi->CallDeegenCommonSnippet(
+                    "GetReturnValueAtSpecifiedOrdinal",
+                    {
+                        ifi->GetRetStart(),
+                        ifi->GetNumRet(),
+                        ord
+                    },
+                    m_origin);
+            }
         }
         ReleaseAssert(llvm_value_has_type<uint64_t>(result));
         ReleaseAssert(llvm_value_has_type<uint64_t>(m_origin));
@@ -137,37 +146,45 @@ void AstReturnValueAccessor::DoLoweringForInterpreterOrBaselineOrDfg(DeegenBytec
         ReleaseAssert(llvm_value_has_type<void*>(dst));
         Value* numToStore = m_origin->getArgOperand(1);
         ReleaseAssert(llvm_value_has_type<size_t>(numToStore));
-        bool canDoQuickCopy = false;
-        uint64_t knownNumForQuickCopy = static_cast<uint64_t>(-1);
-        if (isa<Constant>(numToStore))
+        if (x_use_som_call_semantics)
         {
-            knownNumForQuickCopy = GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(numToStore));
-            if (knownNumForQuickCopy <= x_minNilFillReturnValues)
-            {
-                canDoQuickCopy = true;
-            }
-        }
-
-        if (canDoQuickCopy)
-        {
-            EmitLLVMIntrinsicMemcpy<true /*forceInline*/>(
-                ifi->GetModule(),
-                dst,
-                ifi->GetRetStart() /*src*/,
-                CreateLLVMConstantInt<uint64_t>(ctx, knownNumForQuickCopy * sizeof(TValue)) /*bytesToCopy*/,
-                m_origin);
+            ReleaseAssert(isa<Constant>(numToStore) && GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(numToStore)) == 1);
+            new StoreInst(ifi->GetRetVal(), dst, false /*isVolatile*/, Align(8), m_origin);
         }
         else
         {
-            ifi->CallDeegenCommonSnippet(
-                "StoreFirstKReturnValuesPaddingNil",
+            bool canDoQuickCopy = false;
+            uint64_t knownNumForQuickCopy = static_cast<uint64_t>(-1);
+            if (isa<Constant>(numToStore))
+            {
+                knownNumForQuickCopy = GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(numToStore));
+                if (knownNumForQuickCopy <= x_min_nil_fill_return_values)
                 {
-                    ifi->GetRetStart(),
-                    ifi->GetNumRet(),
+                    canDoQuickCopy = true;
+                }
+            }
+
+            if (canDoQuickCopy)
+            {
+                EmitLLVMIntrinsicMemcpy<true /*forceInline*/>(
+                    ifi->GetModule(),
                     dst,
-                    numToStore
-                },
-                m_origin);
+                    ifi->GetRetStart() /*src*/,
+                    CreateLLVMConstantInt<uint64_t>(ctx, knownNumForQuickCopy * sizeof(TValue)) /*bytesToCopy*/,
+                    m_origin);
+            }
+            else
+            {
+                ifi->CallDeegenCommonSnippet(
+                    "StoreFirstKReturnValuesPaddingNil",
+                    {
+                        ifi->GetRetStart(),
+                        ifi->GetNumRet(),
+                        dst,
+                        numToStore
+                    },
+                    m_origin);
+            }
         }
 
         ReleaseAssert(llvm_value_has_type<void>(m_origin));
@@ -177,6 +194,7 @@ void AstReturnValueAccessor::DoLoweringForInterpreterOrBaselineOrDfg(DeegenBytec
     }
     else if (m_kind == Kind::StoreAsVariadicResults)
     {
+        ReleaseAssert(!x_use_som_call_semantics);
         ReleaseAssert(m_origin->arg_size() == 0);
         ifi->CallDeegenCommonSnippet(
             "StoreReturnValuesAsVariadicResults",

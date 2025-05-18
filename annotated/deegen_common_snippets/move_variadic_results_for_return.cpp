@@ -1,8 +1,12 @@
 #include "define_deegen_common_snippet.h"
 #include "runtime_utils.h"
+#include "deegen_options.h"
 
 static void* DeegenSnippet_MoveVariadicResultsForReturn(uint64_t* stackBase, CoroutineRuntimeContext* coroCtx, uint64_t numPrepends, uint64_t numLocals, uint64_t limSlot)
 {
+    // This function should never be used under SOM call semantics
+    //
+    TestAssert(!x_use_som_call_semantics);
     uint64_t* src = reinterpret_cast<uint64_t*>(coroCtx->m_variadicRetStart);
     uint64_t* dst = stackBase + limSlot;
     uint32_t numResults = coroCtx->m_numVariadicRets;
@@ -14,7 +18,7 @@ static void* DeegenSnippet_MoveVariadicResultsForReturn(uint64_t* stackBase, Cor
         //
         uint64_t* varResEnd = src + numResults;
         uint64_t nilVal = TValue::Create<tNil>().m_value;
-        for (size_t i = 0; i < x_minNilFillReturnValues; i++)
+        for (size_t i = 0; i < x_min_nil_fill_return_values; i++)
         {
             varResEnd[i] = nilVal;
         }
@@ -44,7 +48,7 @@ static void* DeegenSnippet_MoveVariadicResultsForReturn(uint64_t* stackBase, Cor
     //
     TValue* varResEnd = reinterpret_cast<TValue*>(dst) + numResults;
     TValue nilVal = TValue::Create<tNil>();
-    for (size_t i = 0; i < x_minNilFillReturnValues; i++)
+    for (size_t i = 0; i < x_min_nil_fill_return_values; i++)
     {
         varResEnd[i] = nilVal;
     }

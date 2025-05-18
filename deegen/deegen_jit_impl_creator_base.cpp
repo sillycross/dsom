@@ -198,12 +198,23 @@ void JitImplCreatorBase::CreateWrapperFunction()
         tmpInst->eraseFromParent();
 
         Value* retStart = GetExecFnContext()->GetValueAtEntry<RPV_RetValsPtr>();
-        retStart->setName(x_retStart);
-        m_valuePreserver.Preserve(x_retStart, retStart);
+        if (x_use_som_call_semantics)
+        {
+            retStart->setName(x_retVal);
+            m_valuePreserver.Preserve(x_retVal, retStart);
+        }
+        else
+        {
+            retStart->setName(x_retStart);
+            m_valuePreserver.Preserve(x_retStart, retStart);
+        }
 
-        Value* numRet = GetExecFnContext()->GetValueAtEntry<RPV_NumRetVals>();
-        numRet->setName(x_numRet);
-        m_valuePreserver.Preserve(x_numRet, numRet);
+        if (!x_use_som_call_semantics)
+        {
+            Value* numRet = GetExecFnContext()->GetValueAtEntry<RPV_NumRetVals>();
+            numRet->setName(x_numRet);
+            m_valuePreserver.Preserve(x_numRet, numRet);
+        }
 
         if (IsJitSlowPath())
         {

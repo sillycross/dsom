@@ -1095,10 +1095,6 @@ public:
     static std::unique_ptr<ScriptModule> WARN_UNUSED LegacyParseScriptFromJSONBytecodeDump(VM* vm, UserHeapPointer<void> globalObject, const std::string& content);
 };
 
-// The return statement is required to fill nil up to x_minNilFillReturnValues values even if it returns less than that many values
-//
-constexpr uint32_t x_minNilFillReturnValues = 3;
-
 inline void PrintTValue(FILE* fp, TValue val)
 {
     if (val.IsInt32())

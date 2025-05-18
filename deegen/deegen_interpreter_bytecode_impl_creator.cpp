@@ -87,12 +87,23 @@ void InterpreterBytecodeImplCreator::CreateWrapperFunction()
         tmpInst->eraseFromParent();
 
         Value* retStart = GetExecFnContext()->GetValueAtEntry<RPV_RetValsPtr>();
-        retStart->setName(x_retStart);
-        m_valuePreserver.Preserve(x_retStart, retStart);
+        if (x_use_som_call_semantics)
+        {
+            retStart->setName(x_retVal);
+            m_valuePreserver.Preserve(x_retVal, retStart);
+        }
+        else
+        {
+            retStart->setName(x_retStart);
+            m_valuePreserver.Preserve(x_retStart, retStart);
+        }
 
-        Value* numRet = GetExecFnContext()->GetValueAtEntry<RPV_NumRetVals>();
-        numRet->setName(x_numRet);
-        m_valuePreserver.Preserve(x_numRet, numRet);
+        if (!x_use_som_call_semantics)
+        {
+            Value* numRet = GetExecFnContext()->GetValueAtEntry<RPV_NumRetVals>();
+            numRet->setName(x_numRet);
+            m_valuePreserver.Preserve(x_numRet, numRet);
+        }
 
         // Note that the 'm_callerBytecodePtr' is stored in the callee's stack frame header, so we should pass 'calleeStackBase' here
         //

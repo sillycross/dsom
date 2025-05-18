@@ -1,8 +1,16 @@
 #include "define_deegen_common_snippet.h"
 #include "runtime_utils.h"
+#include "deegen_options.h"
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-noreturn"
 
 static void DeegenSnippet_PopulateNilForReturnValues(uint64_t* retStart, uint64_t numRets)
 {
+    // This function should never be used under SOM call semantics
+    //
+    TestAssert(!x_use_som_call_semantics);
+
     // This function is not pre-optimized (since we are using __builtin_constant_p hack),
     // and due to a limitation of our LLVMRepeatedInliningInhibitor scheme, such functions
     // must not have any function calls that needs to be inlined.
@@ -22,7 +30,7 @@ static void DeegenSnippet_PopulateNilForReturnValues(uint64_t* retStart, uint64_
     // that numRet is already at least some value. So we use this __builtin_constant_p hack to
     // write less slots if LLVM can reason about the value of 'numRet'. It's ugly, but should be fine..
     //
-    static_assert(x_minNilFillReturnValues == 3);
+    TestAssert(x_min_nil_fill_return_values == 3);
 
     bool canDeduceAtLeast3 = __builtin_constant_p(numRets >= 3) && (numRets >= 3);
     if (canDeduceAtLeast3)
@@ -55,3 +63,5 @@ DEFINE_DEEGEN_COMMON_SNIPPET("PopulateNilForReturnValues", DeegenSnippet_Populat
 // Do not run optimization, extract directly, so that '__builtin_constant_p' is not prematurely lowered
 //
 DEEGEN_COMMON_SNIPPET_OPTION_DO_NOT_OPTIMIZE_BEFORE_EXTRACT
+
+#pragma clang diagnostic pop

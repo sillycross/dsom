@@ -4,6 +4,7 @@
 #include "deegen_ast_throw_error.h"
 #include "runtime_utils.h"
 #include "tag_register_optimization.h"
+#include "deegen_options.h"
 
 namespace dast {
 
@@ -115,31 +116,50 @@ void UserLibReturnAPI::DoLowering(DeegenLibFuncInstance* ifi)
 
     if (m_isFixedNum)
     {
-        Constant* numReturns = CreateLLVMConstantInt<uint64_t>(ctx, m_returnValues.size());
-        Value* stackbase = ifi->GetStackBase();
-
-        if (m_returnValues.size() < x_minNilFillReturnValues)
+        if (x_use_som_call_semantics)
         {
-            uint64_t val = TValue::Nil().m_value;
-            while (m_returnValues.size() < x_minNilFillReturnValues)
+            ReleaseAssert(m_returnValues.size() == 1);
+            ReleaseAssert(llvm_value_has_type<uint64_t>(m_returnValues[0]));
+            m_retRangeBegin = new IntToPtrInst(m_returnValues[0], llvm_type_of<void*>(ctx), "", m_origin);
+            m_retRangeNum = UndefValue::get(llvm_type_of<uint64_t>(ctx));
+        }
+        else
+        {
+            Value* stackbase = ifi->GetStackBase();
+            Constant* numReturns = CreateLLVMConstantInt<uint64_t>(ctx, m_returnValues.size());
+
+            if (m_returnValues.size() < x_min_nil_fill_return_values)
             {
-                m_returnValues.push_back(CreateLLVMConstantInt<uint64_t>(ctx, val));
+                uint64_t val = TValue::Nil().m_value;
+                while (m_returnValues.size() < x_min_nil_fill_return_values)
+                {
+                    m_returnValues.push_back(CreateLLVMConstantInt<uint64_t>(ctx, val));
+                }
             }
-        }
 
-        for (size_t i = 0; i < m_returnValues.size(); i++)
-        {
-            ReleaseAssert(llvm_value_has_type<uint64_t>(m_returnValues[i]));
-            GetElementPtrInst* gep = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), stackbase, { CreateLLVMConstantInt<uint64_t>(ctx, i) }, "", m_origin);
-            std::ignore = new StoreInst(m_returnValues[i], gep, m_origin);
-        }
+            for (size_t i = 0; i < m_returnValues.size(); i++)
+            {
+                ReleaseAssert(llvm_value_has_type<uint64_t>(m_returnValues[i]));
+                GetElementPtrInst* gep = GetElementPtrInst::CreateInBounds(llvm_type_of<uint64_t>(ctx), stackbase, { CreateLLVMConstantInt<uint64_t>(ctx, i) }, "", m_origin);
+                std::ignore = new StoreInst(m_returnValues[i], gep, m_origin);
+            }
 
-        m_retRangeBegin = stackbase;
-        m_retRangeNum = numReturns;
+            m_retRangeBegin = stackbase;
+            m_retRangeNum = numReturns;
+        }
     }
     else
     {
-        CreateCallToDeegenCommonSnippet(ifi->GetModule(), "PopulateNilForReturnValues", { m_retRangeBegin, m_retRangeNum }, m_origin);
+        if (!x_use_som_call_semantics)
+        {
+            CreateCallToDeegenCommonSnippet(ifi->GetModule(), "PopulateNilForReturnValues", { m_retRangeBegin, m_retRangeNum }, m_origin);
+        }
+        else
+        {
+            ReleaseAssert(isa<Constant>(m_retRangeNum) && GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(m_retRangeNum)) == 1);
+            m_retRangeBegin = new LoadInst(llvm_type_of<void*>(ctx), m_retRangeBegin, "", false /*isVolatile*/, Align(8), m_origin);
+            m_retRangeNum = UndefValue::get(llvm_type_of<uint64_t>(ctx));
+        }
     }
 
     Value* stackbase;
@@ -342,7 +362,7 @@ void DeegenLibLowerInPlaceCallAPIs(DeegenLibFuncInstance* ifi, llvm::Function* f
 
         ifi->GetFuncContext()->PrepareDispatch<FunctionEntryInterface>()
             .Set<RPV_StackBase>(argsBegin)
-            .Set<RPV_NumArgsAsPtr>(numArgsAsPtr)
+            .Set<RPV_NumArgsAsPtr>(x_use_som_call_semantics ? UndefValue::get(llvm_type_of<void*>(ctx)) : numArgsAsPtr)
             .Set<RPV_InterpCodeBlockHeapPtrAsPtr>(calleeCbHeapPtrAsPtr)
             .Set<RPV_IsMustTailCall>(CreateLLVMConstantInt<uint64_t>(ctx, 0))
             .Dispatch(codePointer, callInst /*insertBefore*/);
@@ -419,11 +439,24 @@ DeegenLibFuncInstance::DeegenLibFuncInstance(llvm::Function* impl, llvm::Functio
         Value* stackBase = CreateCallToDeegenCommonSnippet(
             m_module, "GetCallerStackBaseFromStackBase", { m_funcCtx->GetValueAtEntry<RPV_StackBase>() }, bb);
         m_valuePreserver.Preserve(x_stackBase, stackBase);
-        m_valuePreserver.Preserve(x_retStart, m_funcCtx->GetValueAtEntry<RPV_RetValsPtr>());
-        m_valuePreserver.Preserve(x_numRet, m_funcCtx->GetValueAtEntry<RPV_NumRetVals>());
+
+        Value* retStart;
+        Value* numRets;
+        if (!x_use_som_call_semantics)
+        {
+            retStart = m_funcCtx->GetValueAtEntry<RPV_RetValsPtr>();
+            numRets = m_funcCtx->GetValueAtEntry<RPV_NumRetVals>();
+        }
+        else
+        {
+            AllocaInst* alloca = new AllocaInst(llvm_type_of<void*>(ctx), 0 /*addrSpace*/, "", bb->begin());
+            new StoreInst(m_funcCtx->GetValueAtEntry<RPV_RetValsPtr>(), alloca, false /*isVolatile*/, Align(8), bb);
+            retStart = alloca;
+            numRets = CreateLLVMConstantInt<uint64_t>(GetModule()->getContext(), 1);
+        }
 
         ReleaseAssert(m_impl->arg_size() == 4);
-        CallInst::Create(m_impl, { GetCoroutineCtx(), GetStackBase(), GetRetStart(), GetNumRet() }, "", bb);
+        CallInst::Create(m_impl, { GetCoroutineCtx(), GetStackBase(), retStart, numRets }, "", bb);
     }
     else
     {

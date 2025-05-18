@@ -45,7 +45,7 @@ public:
         m_execFnContext = std::move(val);
     }
 
-    llvm::Module* GetModule() { return m_module.get(); }
+    llvm::Module* GetModule() const { return m_module.get(); }
 
     llvm::Value* GetCoroutineCtx() const { return m_valuePreserver.Get(x_coroutineCtx); }
     llvm::Value* GetStackBase() const { return m_valuePreserver.Get(x_stackBase); }
@@ -53,8 +53,20 @@ public:
 
     // The two functions below are only valid for return continuations
     //
-    llvm::Value* GetRetStart() const { ReleaseAssert(IsReturnContinuation()); return m_valuePreserver.Get(x_retStart); }
-    llvm::Value* GetNumRet() const { ReleaseAssert(IsReturnContinuation()); return m_valuePreserver.Get(x_numRet); }
+    llvm::Value* GetRetStart() const { ReleaseAssert(IsReturnContinuation() && !x_use_som_call_semantics); return m_valuePreserver.Get(x_retStart); }
+    llvm::Value* GetRetVal() const { ReleaseAssert(IsReturnContinuation() && x_use_som_call_semantics); return m_valuePreserver.Get(x_retVal); }
+    llvm::Value* GetNumRet() const
+    {
+        ReleaseAssert(IsReturnContinuation());
+        if (x_use_som_call_semantics)
+        {
+            return CreateLLVMConstantInt<uint64_t>(GetModule()->getContext(), 1);
+        }
+        else
+        {
+            return m_valuePreserver.Get(x_numRet);
+        }
+    }
 
     // Only valid if the bytecode actually has an output
     //
@@ -99,6 +111,7 @@ protected:
     static constexpr const char* x_curBytecode = "curBytecode";
     static constexpr const char* x_retStart = "retStart";
     static constexpr const char* x_numRet = "numRet";
+    static constexpr const char* x_retVal = "retVal";
     static constexpr const char* x_outputSlot = "outputSlot";
 };
 

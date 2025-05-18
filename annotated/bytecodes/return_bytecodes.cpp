@@ -4,9 +4,9 @@
 #include "runtime_utils.h"
 #include "vm.h"
 
-static void NO_RETURN ReturnImpl(const TValue* retStart, uint16_t numRet)
+static void NO_RETURN ReturnImpl(const TValue* retStart, uint16_t /*numRet*/)
 {
-    GuestLanguageFunctionReturn(retStart, numRet);
+    GuestLanguageFunctionReturn(retStart, 1);
 }
 
 DEEGEN_DEFINE_BYTECODE(Ret)

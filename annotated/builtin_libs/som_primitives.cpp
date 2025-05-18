@@ -1360,8 +1360,9 @@ DEEGEN_DEFINE_LIB_FUNC(system_printstacktrace)
 {
     SOM_LOG_PRIMITIVE_FREQ(system_printstacktrace);
 
+    TValue self = GetArg(0);
     PrintSOMStackTrace(VM_GetActiveVMForCurrentThread()->GetStdout(), GetStackFrameHeader());
-    Return();
+    Return(self);
 }
 
 DEEGEN_DEFINE_LIB_FUNC(system_printstring)

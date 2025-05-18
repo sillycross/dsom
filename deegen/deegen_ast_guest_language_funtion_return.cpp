@@ -28,6 +28,7 @@ struct LowerGuestLanguageFunctionReturnPass final : public DeegenAbstractSimpleA
         if (symbolName == x_retNoneSymbol)
         {
             ReleaseAssert(origin->arg_size() == 0);
+            ReleaseAssert(!x_use_som_call_semantics);
             retStart = ifi->GetStackBase();
             numRet = CreateLLVMConstantInt<uint64_t>(ctx, 0);
         }
@@ -36,10 +37,12 @@ struct LowerGuestLanguageFunctionReturnPass final : public DeegenAbstractSimpleA
             ReleaseAssert(origin->arg_size() == 2);
             retStart = origin->getArgOperand(0);
             numRet = origin->getArgOperand(1);
+            ReleaseAssertImp(x_use_som_call_semantics, isa<Constant>(numRet) && GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(numRet)) == 1);
         }
         else
         {
             ReleaseAssert(symbolName == x_retVarResSymbol);
+            ReleaseAssert(!x_use_som_call_semantics);
             ReleaseAssert(origin->arg_size() == 2);
             retStart = origin->getArgOperand(0);
             Value* numFixedRet = origin->getArgOperand(1);
@@ -48,13 +51,23 @@ struct LowerGuestLanguageFunctionReturnPass final : public DeegenAbstractSimpleA
 
         ReleaseAssert(llvm_value_has_type<void*>(retStart));
         ReleaseAssert(llvm_value_has_type<uint64_t>(numRet));
-        ifi->CallDeegenCommonSnippet("PopulateNilForReturnValues", { retStart, numRet }, origin);
+        if (!x_use_som_call_semantics)
+        {
+            ifi->CallDeegenCommonSnippet("PopulateNilForReturnValues", { retStart, numRet }, origin);
+        }
+        else
+        {
+            // In SOM since there's always a single return value, we use 'RPV_RetValsPtr' to pass the return value itself
+            //
+            ReleaseAssert(isa<Constant>(numRet) && GetValueOfLLVMConstantInt<uint64_t>(cast<Constant>(numRet)) == 1);
+            retStart = new LoadInst(llvm_type_of<void*>(ctx), retStart, "", false /*isVolatile*/, Align(8), origin);
+        }
 
         Value* retAddr = CreateCallToDeegenCommonSnippet(ifi->GetModule(), "GetRetAddrFromStackBase", { ifi->GetStackBase() }, origin);
         ifi->GetExecFnContext()->PrepareDispatch<ReturnContinuationInterface>()
             .Set<RPV_StackBase>(ifi->GetStackBase())
             .Set<RPV_RetValsPtr>(retStart)
-            .Set<RPV_NumRetVals>(numRet)
+            .Set<RPV_NumRetVals>(x_use_som_call_semantics ? UndefValue::get(llvm_type_of<uint64_t>(ctx)) : numRet)
             .Dispatch(retAddr, origin);
 
         AssertInstructionIsFollowedByUnreachable(origin);

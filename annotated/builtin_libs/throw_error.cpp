@@ -3,6 +3,12 @@
 #include "som_class.h"
 #include "som_utils.h"
 
+#ifdef ENABLE_SOM_PROFILE_FREQUENCY
+#define SOM_LOG_PRIMITIVE_FREQ(name) do { VM_GetActiveVMForCurrentThread()->IncrementPrimitiveFuncCallCount(PP_STRINGIFY(name)); } while (false)
+#else
+#define SOM_LOG_PRIMITIVE_FREQ(name) do { } while (false)
+#endif
+
 static bool WARN_UNUSED ALWAYS_INLINE IsClosureMethod(HeapPtr<FunctionObject> func)
 {
     SOMDetailEntityType fnTy = static_cast<SOMDetailEntityType>(func->m_invalidArrayType & 15);
@@ -28,6 +34,8 @@ DEEGEN_DEFINE_LIB_FUNC_CONTINUATION(EscapedBlockReturnCont)
 //
 DEEGEN_DEFINE_LIB_FUNC(DeegenInternal_ThrowTValueErrorImpl)
 {
+    SOM_LOG_PRIMITIVE_FREQ(block_throw);
+
     // We repurpose 'numArgs' to be the TValue storing the exception object
     //
     TValue exnObject; exnObject.m_value = GetNumArgs();

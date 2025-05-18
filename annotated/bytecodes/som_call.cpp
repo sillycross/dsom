@@ -71,11 +71,6 @@ DEEGEN_DEFINE_BYTECODE(SOMCall)
     Implementation(CallImpl);
     Variant();
     DfgVariant();
-    for (uint16_t i = 0; i <= 6; i++)
-    {
-        Variant(Op("numArgs").HasValue(i));
-        DfgVariant(Op("numArgs").HasValue(i));
-    }
     TypeDeductionRule(ValueProfile);
     DeclareReads(
         Range(Op("base"), 1),

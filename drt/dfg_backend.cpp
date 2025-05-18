@@ -1,4 +1,5 @@
 #include "common_utils.h"
+#include "deegen_options.h"
 #include "dfg_backend.h"
 #include "temp_arena_allocator.h"
 #include "dfg_node.h"
@@ -2317,9 +2318,9 @@ private:
                 // We may need to append nils to the end of the return values to satisfy our internal protocol
                 // Note that for Ret0 and Ret1, the specialized implementation has already dealt with that for us.
                 //
-                if (operands.size() < x_minNilFillReturnValues)
+                if (operands.size() < x_min_nil_fill_return_values)
                 {
-                    size_t numNilFillsNeeded = x_minNilFillReturnValues - operands.size();
+                    size_t numNilFillsNeeded = x_min_nil_fill_return_values - operands.size();
                     for (size_t idx = 0; idx < numNilFillsNeeded; idx++)
                     {
                         const DfgVariantTraits* trait = GetCodegenInfoForCustomBuiltinNodeLogicFragment(DfgBuiltinNodeCustomCgFn::Return_WriteNil);

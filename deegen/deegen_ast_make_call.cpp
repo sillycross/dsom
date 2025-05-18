@@ -860,11 +860,18 @@ void AstMakeCall::DoLoweringForInterpreter(InterpreterBytecodeImplCreator* ifi)
     ReleaseAssert(llvm_value_has_type<uint64_t>(totalNumArgs));
     Value* totalNumArgsAsPtr = new IntToPtrInst(totalNumArgs, llvm_type_of<void*>(ctx), "", m_origin);
 
+    Value* isMustTailCall = CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall));
+    if (x_use_som_call_semantics)
+    {
+        ReleaseAssert(!m_isMustTailCall);
+        isMustTailCall = UndefValue::get(llvm_type_of<uint64_t>(ctx));
+    }
+
     ifi->GetExecFnContext()->PrepareDispatch<FunctionEntryInterface>()
         .Set<RPV_StackBase>(newSfBase)
-        .Set<RPV_NumArgsAsPtr>(totalNumArgsAsPtr)
+        .Set<RPV_NumArgsAsPtr>(x_use_som_call_semantics ? UndefValue::get(llvm_type_of<void*>(ctx)) : totalNumArgsAsPtr)
         .Set<RPV_InterpCodeBlockHeapPtrAsPtr>(calleeCbHeapPtrAsPtr)
-        .Set<RPV_IsMustTailCall>(CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall)))
+        .Set<RPV_IsMustTailCall>(isMustTailCall)
         .Dispatch(codePointer, m_origin /*insertBefore*/);
 
     AssertInstructionIsFollowedByUnreachable(m_origin);
@@ -972,11 +979,18 @@ void AstMakeCall::DoLoweringForBaselineJIT(BaselineJitImplCreator* ifi, size_t u
         ReleaseAssert(llvm_value_has_type<uint64_t>(totalNumArgs));
         Value* totalNumArgsAsPtr = new IntToPtrInst(totalNumArgs, llvm_type_of<void*>(ctx), "", origin);
 
+        Value* isMustTailCall = CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall));
+        if (x_use_som_call_semantics)
+        {
+            ReleaseAssert(!m_isMustTailCall);
+            isMustTailCall = UndefValue::get(llvm_type_of<uint64_t>(ctx));
+        }
+
         ifi->GetExecFnContext()->PrepareDispatch<FunctionEntryInterface>()
             .Set<RPV_StackBase>(newSfBase)
-            .Set<RPV_NumArgsAsPtr>(totalNumArgsAsPtr)
+            .Set<RPV_NumArgsAsPtr>(x_use_som_call_semantics ? UndefValue::get(llvm_type_of<void*>(ctx)) : totalNumArgsAsPtr)
             .Set<RPV_InterpCodeBlockHeapPtrAsPtr>(calleeCbHeapPtrAsPtr)
-            .Set<RPV_IsMustTailCall>(CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall)))
+            .Set<RPV_IsMustTailCall>(isMustTailCall)
             .Dispatch(codePointer, origin /*insertBefore*/);
 
         AssertInstructionIsFollowedByUnreachable(origin);
@@ -1076,11 +1090,18 @@ void AstMakeCall::DoLoweringForDfgJIT(DfgJitImplCreator* ifi)
     ReleaseAssert(llvm_value_has_type<uint64_t>(totalNumArgs));
     Value* totalNumArgsAsPtr = new IntToPtrInst(totalNumArgs, llvm_type_of<void*>(ctx), "", m_origin);
 
+    Value* isMustTailCall = CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall));
+    if (x_use_som_call_semantics)
+    {
+        ReleaseAssert(!m_isMustTailCall);
+        isMustTailCall = UndefValue::get(llvm_type_of<uint64_t>(ctx));
+    }
+
     ifi->GetExecFnContext()->PrepareDispatch<FunctionEntryInterface>()
         .Set<RPV_StackBase>(newSfBase)
-        .Set<RPV_NumArgsAsPtr>(totalNumArgsAsPtr)
+        .Set<RPV_NumArgsAsPtr>(x_use_som_call_semantics ? UndefValue::get(llvm_type_of<void*>(ctx)) : totalNumArgsAsPtr)
         .Set<RPV_InterpCodeBlockHeapPtrAsPtr>(calleeCbHeapPtrAsPtr)
-        .Set<RPV_IsMustTailCall>(CreateLLVMConstantInt<uint64_t>(ctx, static_cast<uint64_t>(m_isMustTailCall)))
+        .Set<RPV_IsMustTailCall>(isMustTailCall)
         .Dispatch(codePointer, m_origin /*insertBefore*/);
 
     AssertInstructionIsFollowedByUnreachable(m_origin);

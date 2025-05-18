@@ -47,6 +47,24 @@ constexpr size_t x_forbid_tier_up_to_dfg_num_bytecodes_threshold = 200000;
 static_assert(!(!x_allow_interpreter_tier_up_to_baseline_jit && x_allow_baseline_jit_tier_up_to_optimizing_jit),
               "Enabling optimizing JIT requires enabling baseline JIT as well!");
 
+// SOM call uses fewer features than the fully-fledge Deegen call model provides,
+// and has more statically known guarantees that allows simpler code.
+//
+// When this boolean is true, Deegen will additionally assume that:
+// 1. The number of arguments passed in to the callee must be exactly what the callee expects.
+// 2. Each function has exactly one return value, no multiple-return or variadic return.
+// 3. Tail call and variadic call is never needed.
+//
+constexpr bool x_use_som_call_semantics = true;
+
+// The return statement is required to fill nil up to x_minNilFillReturnValues values even if it returns less than that many values (internal Deegen ABI)
+//
+constexpr uint32_t x_min_nil_fill_return_values = x_use_som_call_semantics ? 1 : 3;
+
+// If 'x_use_som_call_semantics' is true, 'x_min_nil_fill_return_values' should be 1
+//
+static_assert(!x_use_som_call_semantics || x_min_nil_fill_return_values == 1);
+
 // LLVM will try to avoid using 3-ops LEA instructions (e.g., "leaq 32(%rdi,%rsi,8), %rax") by default,
 // since on Intel SandyBridge and SkyLake CPUs (and AlderLake E-cores), 3-ops LEA are costly (3 cycle latency and 1 reciprocal throughput)
 // This issue does not exist on AMD CPUs and also has been fixed for Intel since Ice Lake (but still exists on AlderLake E-core).

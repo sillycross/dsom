@@ -2,6 +2,7 @@
 
 #include "common_utils.h"
 #include "tvalue.h"
+#include "deegen_options.h"
 
 class CoroutineRuntimeContext;
 

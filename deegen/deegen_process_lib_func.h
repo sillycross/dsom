@@ -1,5 +1,6 @@
 #pragma once
 
+#include "deegen_options.h"
 #include "misc_llvm_helper.h"
 #include "deegen_register_pinning_scheme.h"
 
@@ -25,8 +26,6 @@ public:
     llvm::Value* GetCoroutineCtx() const { return m_valuePreserver.Get(x_coroutineCtx); }
     llvm::Value* GetStackBase() const { return m_valuePreserver.Get(x_stackBase); }
     llvm::Value* GetNumArgs() const { ReleaseAssert(!m_isReturnContinuation); return m_valuePreserver.Get(x_numArgs); }
-    llvm::Value* GetRetStart() const { ReleaseAssert(m_isReturnContinuation); return m_valuePreserver.Get(x_retStart); }
-    llvm::Value* GetNumRet() const { ReleaseAssert(m_isReturnContinuation); return m_valuePreserver.Get(x_numRet); }
 
     ExecutorFunctionContext* GetFuncContext()
     {
@@ -38,8 +37,6 @@ private:
     static constexpr const char* x_coroutineCtx = "coroutineCtx";
     static constexpr const char* x_stackBase = "stackBase";
     static constexpr const char* x_numArgs = "numArgs";
-    static constexpr const char* x_retStart = "retStart";
-    static constexpr const char* x_numRet = "numRet";
 
     LLVMValuePreserver m_valuePreserver;
     std::unique_ptr<ExecutorFunctionContext> m_funcCtx;

@@ -243,7 +243,11 @@ void DeegenFunctionEntryLogicCreator::Run(llvm::LLVMContext& ctx)
     }
 
     Value* stackBaseAfterFixUp = nullptr;
-    if (!m_acceptVarArgs)
+    if (x_use_som_call_semantics)
+    {
+        stackBaseAfterFixUp = preFixupStackBase;
+    }
+    else if (!m_acceptVarArgs)
     {
         if (IsNumFixedParamSpecialized())
         {
