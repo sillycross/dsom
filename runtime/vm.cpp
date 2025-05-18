@@ -307,6 +307,23 @@ bool WARN_UNUSED VM::InitializeVMGlobalData()
     m_systemClass = nullptr;
     m_metaclassClassLoaded = false;
 
+    m_stringIdForWhileTrue = m_interner.InternString("whileTrue:");
+    m_stringIdForWhileFalse = m_interner.InternString("whileFalse:");
+    m_stringIdForIfTrueIfFalse = m_interner.InternString("ifTrue:ifFalse:");
+    m_stringIdForIfFalseIfTrue = m_interner.InternString("ifFalse:ifTrue:");
+    m_stringIdForIfNilIfNotNil = m_interner.InternString("ifNil:ifNotNil:");
+    m_stringIdForIfNotNilIfNil = m_interner.InternString("ifNotNil:ifNil:");
+    m_stringIdForIfTrue = m_interner.InternString("ifTrue:");
+    m_stringIdForIfFalse = m_interner.InternString("ifFalse:");
+    m_stringIdForIfNil = m_interner.InternString("ifNil:");
+    m_stringIdForIfNotNil = m_interner.InternString("ifNotNil:");
+    m_stringIdForOperatorAnd = m_interner.InternString("&&");
+    m_stringIdForOperatorOr = m_interner.InternString("||");
+    m_stringIdForMethodAnd = m_interner.InternString("and:");
+    m_stringIdForMethodOr = m_interner.InternString("or:");
+    m_stringIdForToDo = m_interner.InternString("to:do:");
+    m_stringIdForDowntoDo = m_interner.InternString("downTo:do:");
+
     CreateRootCoroutine();
     return true;
 }

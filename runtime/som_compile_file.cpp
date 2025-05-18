@@ -157,6 +157,8 @@ struct BlockTranslationContext
         , m_hasCapturedLocal(false)
         , m_containsThrowableBlocks(false)
         , m_blockMayThrow(false)
+        , m_returnValueMayBeDiscarded(false)
+        , m_returnValueSlot(static_cast<uint32_t>(-1))
         , m_uvs(alloc)
         , m_uvOrdMap(alloc)
     { }
@@ -173,6 +175,8 @@ struct BlockTranslationContext
         , m_hasCapturedLocal(false)
         , m_containsThrowableBlocks(false)
         , m_blockMayThrow(false)
+        , m_returnValueMayBeDiscarded(false)
+        , m_returnValueSlot(static_cast<uint32_t>(-1))
         , m_uvs(alloc)
         , m_uvOrdMap(alloc)
     { }
@@ -180,6 +184,46 @@ struct BlockTranslationContext
     bool IsInlined()
     {
         return m_owningContext != this;
+    }
+
+    // Return true if this block is either a top-level method, or a block inlined into a top-level method
+    //
+    bool IsInlinedIntoTopLevelMethod()
+    {
+        return m_trueParent == nullptr;
+    }
+
+    // Return true if this block is the top-level method itself
+    //
+    bool IsTopLevelMethod()
+    {
+        return m_trueParent == nullptr && m_owningContext == this;
+    }
+
+    // For blocks inlined into a top-level method, the throw expession should be compiled to return
+    // In other cases, it should still be compiled to a throw
+    //
+    bool ShouldCompileThrowIntoReturn()
+    {
+        // Throw doesn't make sense in top-level method
+        //
+        TestAssert(!IsTopLevelMethod());
+        return IsInlinedIntoTopLevelMethod();
+    }
+
+    // For blocks inined into another block, the return value is sometimes discardable.
+    //
+    bool ReturnValueMayBeDiscarded()
+    {
+        TestAssert(IsInlined());
+        return m_returnValueMayBeDiscarded;
+    }
+
+    uint32_t GetReturnValueSlotForInlinedBlock()
+    {
+        TestAssert(IsInlined());
+        TestAssert(m_returnValueSlot != static_cast<uint32_t>(-1));
+        return m_returnValueSlot;
     }
 
     // Return the upvalue ordinal
@@ -252,6 +296,11 @@ struct BlockTranslationContext
     // If this or m_containsThrowableBlocks is true, then this block must mutably capture 'self'
     //
     bool m_blockMayThrow;
+    // Only makes sense if this block is inlined
+    // In this case, the return value should be stored into a slot instead, and sometimes is discardable
+    //
+    bool m_returnValueMayBeDiscarded;
+    uint32_t m_returnValueSlot;
     // Only valid if !IsInlined()
     // Stores the list of upvalues used by this block
     // For any block, m_uvs[0] is always the capture 'self'
@@ -364,7 +413,7 @@ struct VarResolveResult
 
 bool WARN_UNUSED IsVariableResolvedToLocal(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
 {
-    if (varName == "self")
+    if (varName == "self" || varName == "super")
     {
         return true;
     }
@@ -375,6 +424,15 @@ bool WARN_UNUSED IsVariableResolvedToLocal(TranslationContext& ctx, BlockTransla
         return var->m_bctx->m_owningContext == bctx.m_owningContext;
     }
     return false;
+}
+
+bool WARN_UNUSED IsVariableResolvedToLocalOrField(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+{
+    if (IsVariableResolvedToLocal(ctx, bctx, varName))
+    {
+        return true;
+    }
+    return ctx.m_fieldMap.count(varName);
 }
 
 VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName, bool forRead)
@@ -433,10 +491,6 @@ VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTrans
         auto it = ctx.m_fieldMap.find(varName);
         if (it != ctx.m_fieldMap.end())
         {
-            // I'm not sure what is the expected behavior of defining a local or field named "super", assert for now.
-            //
-            TestAssert(varName != "super");
-
             return VarResolveResult {
                 .m_kind = VarUseKind::Field,
                 .m_ord = it->second
@@ -572,10 +626,6 @@ void CompileTopLevelAssignation(TranslationContext& ctx, BlockTranslationContext
         return;
     }
 
-    // If rhs is a variable use or a literal, we can still attempt to emit direct mov if one of the lhs is a local
-    // TODO: we could allow more rhs sides
-    //
-    if (node->m_rhs->GetKind() == AstExprKind::VarUse || node->m_rhs->IsLiteral())
     {
         // If one of the lhs is a local, we can evaluate the varUse into that local, and copy the value to all other lhs
         //
@@ -611,6 +661,13 @@ void CompileTopLevelAssignation(TranslationContext& ctx, BlockTranslationContext
     CompileAssignation(ctx, bctx, node, clobberSlot, clobberSlot /*destSlot*/);
 }
 
+void InlineBlock(TranslationContext& ctx,
+                 BlockTranslationContext& bctx,
+                 AstNestedBlock* block,
+                 uint32_t frameStartSlot,
+                 uint32_t destSlot,
+                 bool mayDiscardReturnValue);
+
 bool WARN_UNUSED ReceiverIsSelf(AstExpr* e)
 {
     return (e->GetKind() == AstExprKind::VarUse && assert_cast<AstVariableUse*>(e)->m_varInfo.m_name == "self");
@@ -633,8 +690,9 @@ enum class SOMReceiverKind
 };
 
 // Compile a 'self' call where 'self' is known to be an SOMObject
+// 'isTopLevel == true' means this is a top-level statement and the return value may be safely discarded
 //
-void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* receiver, AstSymbol* selector, std::span<AstExpr*> args, uint32_t clobberSlot, uint32_t destSlot)
+void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* receiver, AstSymbol* selector, std::span<AstExpr*> args, uint32_t clobberSlot, uint32_t destSlot, bool isTopLevel = false)
 {
     ctx.UpdateTopSlot(destSlot);
     ctx.UpdateTopSlot(static_cast<uint32_t>(clobberSlot + x_numSlotsForStackFrameHeader + args.size()));
@@ -646,6 +704,468 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
     else if (ReceiverIsSuper(receiver))
     {
         rcvKind = SOMReceiverKind::Super;
+    }
+
+    // Inlining control flow structures is technically unsound, but allowed by Smalltalk standard and also done by SOM++/TruffleSOM etc.
+    // Also, even though Smalltalk standard allows these unsound inlining, I don't think SOM++ has did it exactly correctly (it's missing more checks).
+    // But my goal here is to replicate SOM++ behavior so I'll just do whatever SOM++ did.
+    //
+    bool performUnsoundInlining = true;
+
+    if (performUnsoundInlining)
+    {
+        VM* vm = VM_GetActiveVMForCurrentThread();
+        size_t methId = selector->m_globalOrd;
+        if (methId == vm->m_stringIdForIfTrue || methId == vm->m_stringIdForIfFalse ||
+            methId == vm->m_stringIdForIfNil || methId == vm->m_stringIdForIfNotNil)
+        {
+            TestAssert(args.size() == 1);
+            if (args[0]->GetKind() == AstExprKind::NestedBlock)
+            {
+                AstNestedBlock* block = assert_cast<AstNestedBlock*>(args[0]);
+                if (block->m_params.size() == 0)
+                {
+                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    size_t branchBcLoc = ctx.m_builder.GetCurLength();
+                    bool needExplicitElseBranch = false;
+                    if (methId == vm->m_stringIdForIfFalse)
+                    {
+                        if (isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfTrue({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateStoreNilAndBranchIfTrue({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfTrue({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+                    else if (methId == vm->m_stringIdForIfTrue)
+                    {
+                        if (isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfFalse({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateStoreNilAndBranchIfFalse({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfFalse({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+                    else if (methId == vm->m_stringIdForIfNil)
+                    {
+                        if (clobberSlot == destSlot || isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfNotNil({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateCopyAndBranchIfNotNil({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfNotNil({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForIfNotNil);
+                        if (clobberSlot == destSlot || isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfNil({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateCopyAndBranchIfNil({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfNil({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+
+                    InlineBlock(ctx, bctx, block, clobberSlot, destSlot /*destSlot*/, isTopLevel /*mayDiscardReturnValue*/);
+
+                    if (!needExplicitElseBranch)
+                    {
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(branchBcLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+                    }
+                    else
+                    {
+                        size_t elseBrLoc = ctx.m_builder.GetCurLength();
+                        ctx.m_builder.CreateBranch();
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(branchBcLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+
+                        if (methId == vm->m_stringIdForIfFalse || methId == vm->m_stringIdForIfTrue)
+                        {
+                            ctx.m_builder.CreateMov({
+                                .input = TValue::Create<tNil>(),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            TestAssert(methId == vm->m_stringIdForIfNil || methId == vm->m_stringIdForIfNotNil);
+                            ctx.m_builder.CreateMov({
+                                .input = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(elseBrLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        if (methId == vm->m_stringIdForIfTrueIfFalse || methId == vm->m_stringIdForIfFalseIfTrue ||
+            methId == vm->m_stringIdForIfNilIfNotNil || methId == vm->m_stringIdForIfNotNilIfNil)
+        {
+            TestAssert(args.size() == 2);
+            if (args[0]->GetKind() == AstExprKind::NestedBlock && args[1]->GetKind() == AstExprKind::NestedBlock)
+            {
+                AstNestedBlock* block1 = assert_cast<AstNestedBlock*>(args[0]);
+                AstNestedBlock* block2 = assert_cast<AstNestedBlock*>(args[1]);
+                if (block1->m_params.size() == 0 && block2->m_params.size() == 0)
+                {
+                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    size_t branchBcLoc = ctx.m_builder.GetCurLength();
+                    if (methId == vm->m_stringIdForIfTrueIfFalse)
+                    {
+                        ctx.m_builder.CreateBranchIfFalse({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+                    else if (methId == vm->m_stringIdForIfFalseIfTrue)
+                    {
+                        ctx.m_builder.CreateBranchIfTrue({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+                    else if (methId == vm->m_stringIdForIfNilIfNotNil)
+                    {
+                        ctx.m_builder.CreateBranchIfNotNil({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForIfNotNilIfNil);
+                        ctx.m_builder.CreateBranchIfNil({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+                    InlineBlock(ctx, bctx, block1, clobberSlot, destSlot, isTopLevel /*mayDiscardReturnValue*/);
+                    size_t elseBranchBcLoc = ctx.m_builder.GetCurLength();
+                    ctx.m_builder.CreateBranch();
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(branchBcLoc, ctx.m_builder.GetCurLength())))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    InlineBlock(ctx, bctx, block2, clobberSlot, destSlot, false /*mayDiscardReturnValue*/);
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(elseBranchBcLoc, ctx.m_builder.GetCurLength())))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    return;
+                }
+            }
+        }
+
+        if (methId == vm->m_stringIdForMethodAnd || methId == vm->m_stringIdForMethodOr ||
+            methId == vm->m_stringIdForOperatorAnd || methId == vm->m_stringIdForOperatorOr)
+        {
+            TestAssert(args.size() == 1);
+            if (args[0]->GetKind() == AstExprKind::NestedBlock)
+            {
+                AstNestedBlock* block = assert_cast<AstNestedBlock*>(args[0]);
+                if (block->m_params.size() == 0)
+                {
+                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    size_t branchBcLoc = ctx.m_builder.GetCurLength();
+
+                    bool needExplicitElseBranch = false;
+                    if (methId == vm->m_stringIdForMethodAnd || methId == vm->m_stringIdForOperatorAnd)
+                    {
+                        if (clobberSlot == destSlot || isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfFalse({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateCopyAndBranchIfFalse({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfFalse({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForMethodOr || methId == vm->m_stringIdForOperatorOr);
+                        if (clobberSlot == destSlot || isTopLevel)
+                        {
+                            ctx.m_builder.CreateBranchIfTrue({
+                                .cond = Local(clobberSlot)
+                            });
+                        }
+                        else if (destSlot >= clobberSlot)
+                        {
+                            ctx.m_builder.CreateCopyAndBranchIfTrue({
+                                .cond = Local(clobberSlot),
+                                .output = Local(destSlot)
+                            });
+                        }
+                        else
+                        {
+                            // It's not safe to early-clobber destSlot
+                            //
+                            ctx.m_builder.CreateBranchIfTrue({
+                                .cond = Local(clobberSlot)
+                            });
+                            needExplicitElseBranch = true;
+                        }
+                    }
+
+                    InlineBlock(ctx, bctx, block, clobberSlot, destSlot /*destSlot*/, isTopLevel /*mayDiscardReturnValue*/);
+
+                    if (!needExplicitElseBranch)
+                    {
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(branchBcLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+                    }
+                    else
+                    {
+                        size_t elseBrLoc = ctx.m_builder.GetCurLength();
+                        ctx.m_builder.CreateBranch();
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(branchBcLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+                        ctx.m_builder.CreateMov({
+                            .input = Local(clobberSlot),
+                            .output = Local(destSlot)
+                        });
+                        if (unlikely(!ctx.m_builder.SetBranchTarget(elseBrLoc, ctx.m_builder.GetCurLength())))
+                        {
+                            fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                            abort();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        if (methId == vm->m_stringIdForWhileTrue || methId == vm->m_stringIdForWhileFalse)
+        {
+            TestAssert(args.size() == 1);
+            if (receiver->GetKind() == AstExprKind::NestedBlock && args[0]->GetKind() == AstExprKind::NestedBlock)
+            {
+                AstNestedBlock* condBlock = assert_cast<AstNestedBlock*>(receiver);
+                AstNestedBlock* stmtBlock = assert_cast<AstNestedBlock*>(args[0]);
+                if (condBlock->m_params.size() == 0 && stmtBlock->m_params.size() == 0)
+                {
+                    size_t loopBeginOffset = ctx.m_builder.GetCurLength();
+                    InlineBlock(ctx, bctx, condBlock, clobberSlot, clobberSlot /*destSlot*/, false /*mayDiscardReturnValue*/);
+
+                    size_t checkCondOffset = ctx.m_builder.GetCurLength();
+                    if (methId == vm->m_stringIdForWhileTrue)
+                    {
+                        ctx.m_builder.CreateBranchIfFalse({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForWhileFalse);
+                        ctx.m_builder.CreateBranchIfTrue({
+                            .cond = Local(clobberSlot)
+                        });
+                    }
+
+                    InlineBlock(ctx, bctx, stmtBlock, clobberSlot, clobberSlot /*destSlot*/, true /*mayDiscardReturnValue*/);
+
+                    size_t endBranchBcLoc = ctx.m_builder.GetCurLength();
+                    ctx.m_builder.CreateBranchLoopHint();
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(endBranchBcLoc, loopBeginOffset)))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(checkCondOffset, ctx.m_builder.GetCurLength())))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    if (!isTopLevel)
+                    {
+                        ctx.m_builder.CreateMov({
+                            .input = TValue::Create<tNil>(),
+                            .output = Local(destSlot)
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+
+        if (methId == vm->m_stringIdForToDo || methId == vm->m_stringIdForDowntoDo)
+        {
+            TestAssert(args.size() == 2);
+            if (args[1]->GetKind() == AstExprKind::NestedBlock)
+            {
+                AstNestedBlock* stmtBlock = assert_cast<AstNestedBlock*>(args[1]);
+
+                if (stmtBlock->m_params.size() == 1)
+                {
+                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+
+                    if (!isTopLevel)
+                    {
+                        ctx.m_builder.CreateMov({
+                            .input = Local(clobberSlot),
+                            .output = Local(clobberSlot + 1)
+                        });
+                        clobberSlot++;
+                    }
+
+                    CompileExpression(ctx, bctx, args[0], clobberSlot + 1, clobberSlot + 1 /*destSlot*/);
+
+                    ctx.UpdateTopSlot(clobberSlot + 2);
+
+                    size_t loopStartOffset = ctx.m_builder.GetCurLength();
+                    if (methId == vm->m_stringIdForToDo)
+                    {
+                        ctx.m_builder.CreateCheckForLoopStartCond({
+                            .val = Local(clobberSlot),
+                            .limit = Local(clobberSlot + 1),
+                            .output = Local(clobberSlot + 2)
+                        });
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForDowntoDo);
+                        ctx.m_builder.CreateCheckDowntoForLoopStartCond({
+                            .val = Local(clobberSlot),
+                            .limit = Local(clobberSlot + 1),
+                            .output = Local(clobberSlot + 2)
+                        });
+                    }
+
+                    size_t bodyStartOffset = ctx.m_builder.GetCurLength();
+                    InlineBlock(ctx, bctx, stmtBlock, clobberSlot + 2, clobberSlot + 2 /*destSlot*/, true /*mayDiscardReturnValue*/);
+
+                    size_t loopCheckOffset = ctx.m_builder.GetCurLength();
+                    if (methId == vm->m_stringIdForToDo)
+                    {
+                        ctx.m_builder.CreateForLoopStep({
+                            .base = Local(clobberSlot)
+                        });
+                    }
+                    else
+                    {
+                        TestAssert(methId == vm->m_stringIdForDowntoDo);
+                        ctx.m_builder.CreateDowntoForLoopStep({
+                            .base = Local(clobberSlot)
+                        });
+                    }
+
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(loopCheckOffset, bodyStartOffset)))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    if (unlikely(!ctx.m_builder.SetBranchTarget(loopStartOffset, ctx.m_builder.GetCurLength())))
+                    {
+                        fprintf(stderr, "[ERROR] Branch exceeded bytecode maximum branch distance, function is too long.\n");
+                        abort();
+                    }
+                    if (!isTopLevel && clobberSlot - 1 != destSlot)
+                    {
+                        ctx.m_builder.CreateMov({
+                            .input = Local(clobberSlot - 1),
+                            .output = Local(destSlot)
+                        });
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     uint32_t argBase = clobberSlot + x_numSlotsForStackFrameHeader;
@@ -704,24 +1224,23 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
     }
 }
 
-void CompileUnaryCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstUnaryCall* node, uint32_t clobberSlot, uint32_t destSlot)
+void CompileUnaryCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstUnaryCall* node, uint32_t clobberSlot, uint32_t destSlot, bool isTopLevel = false)
 {
-    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, std::span<AstExpr*>{}, clobberSlot, destSlot);
+    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, std::span<AstExpr*>{}, clobberSlot, destSlot, isTopLevel);
 }
 
-void CompileBinaryCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstBinaryCall* node, uint32_t clobberSlot, uint32_t destSlot)
+void CompileBinaryCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstBinaryCall* node, uint32_t clobberSlot, uint32_t destSlot, bool isTopLevel = false)
 {
-    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, std::span<AstExpr*>{ &node->m_argument, 1 }, clobberSlot, destSlot);
+    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, std::span<AstExpr*>{ &node->m_argument, 1 }, clobberSlot, destSlot, isTopLevel);
 }
 
-void CompileKeywordCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstKeywordCall* node, uint32_t clobberSlot, uint32_t destSlot)
+void CompileKeywordCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstKeywordCall* node, uint32_t clobberSlot, uint32_t destSlot, bool isTopLevel = false)
 {
-    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, node->m_arguments, clobberSlot, destSlot);
+    CompileSOMCall(ctx, bctx, node->m_receiver, node->m_selector, node->m_arguments, clobberSlot, destSlot, isTopLevel);
 }
 
 void CompileReturn(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* node, uint32_t clobberSlot)
 {
-    TestAssert(!bctx.IsInlined());
     CompileExpression(ctx, bctx, node, clobberSlot, clobberSlot /*destSlot*/);
     if (bctx.MustEmitUpvalueCloseBeforeReturn())
     {
@@ -797,24 +1316,40 @@ void UninstallLocalVariables(TranslationContext& ctx, BlockTranslationContext& b
     }
 }
 
-void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, AstBlock* block, bool isBlock, uint32_t clobberSlot)
+void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, AstBlock* block, uint32_t clobberSlot)
 {
-    TestAssert(!bctx.IsInlined());
     bool shouldReturnSelf = false;
     if (block->m_body.size() == 0)
     {
-        if (isBlock)
+        if (!bctx.IsTopLevelMethod())
         {
             // For an empty block, the behavior is to return nil
             //
-            ctx.m_builder.CreateMov({
-                .input = TValue::Create<tNil>(),
-                .output = Local(0)
-            });
-            ctx.m_builder.CreateRet({
-                .retStart = Local(0),
-                .numRet = 1
-            });
+            if (bctx.IsInlined())
+            {
+                if (bctx.ReturnValueMayBeDiscarded())
+                {
+                    /* nothing to do */
+                }
+                else
+                {
+                    ctx.m_builder.CreateMov({
+                        .input = TValue::Create<tNil>(),
+                        .output = Local(bctx.GetReturnValueSlotForInlinedBlock())
+                    });
+                }
+            }
+            else
+            {
+                ctx.m_builder.CreateMov({
+                    .input = TValue::Create<tNil>(),
+                    .output = Local(0)
+                });
+                ctx.m_builder.CreateRet({
+                    .retStart = Local(0),
+                    .numRet = 1
+                });
+            }
         }
         else
         {
@@ -833,9 +1368,20 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
         if (expr->GetKind() == AstExprKind::Return)
         {
             AstReturn* ret = assert_cast<AstReturn*>(expr);
-            if (isBlock)
+            if (!bctx.IsTopLevelMethod())
             {
-                CompileThrow(ctx, bctx, ret->m_retVal, clobberSlot);
+                // This is a block, the explicit return expression should be interpreted as a throw expression
+                //
+                if (bctx.ShouldCompileThrowIntoReturn())
+                {
+                    // Due to inlining, the throw expression should be compiled into a return expression
+                    //
+                    CompileReturn(ctx, bctx, ret->m_retVal, clobberSlot);
+                }
+                else
+                {
+                    CompileThrow(ctx, bctx, ret->m_retVal, clobberSlot);
+                }
             }
             else
             {
@@ -847,16 +1393,47 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
         {
             // Last statement is not a return, if it is a block, then it is implicitly a return
             //
-            if (isBlock)
+            if (!bctx.IsTopLevelMethod())
             {
                 // For block, the return value is the last statement's value
                 //
-                CompileReturn(ctx, bctx, expr, clobberSlot);
+                if (bctx.IsInlined())
+                {
+                    // Emit UpvalueClose if needed
+                    //
+                    if (bctx.MustEmitUpvalueCloseBeforeReturn())
+                    {
+                        ctx.m_builder.CreateUpvalueClose({
+                            .base = Local(bctx.m_startSlot)
+                        });
+                    }
+                    // If the block is inlined, the return value should be stored to bctx.ReturnValueSlot() instead
+                    //
+                    if (bctx.ReturnValueMayBeDiscarded() &&
+                        (expr->IsLiteral() ||
+                         (expr->GetKind() == AstExprKind::VarUse && IsVariableResolvedToLocalOrField(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name)) ||
+                         expr->GetKind() == AstExprKind::NestedBlock))
+                    {
+                        // The return value expression has no observable side effects (note that global get *may* have observable effect!),
+                        // and the return value can be discarded, nothing to do
+                        //
+                    }
+                    else
+                    {
+                        CompileExpression(ctx, bctx, expr, clobberSlot, bctx.GetReturnValueSlotForInlinedBlock());
+                    }
+                }
+                else
+                {
+                    // The block is not inlined, should generate a normal return
+                    //
+                    CompileReturn(ctx, bctx, expr, clobberSlot);
+                }
                 break;
             }
             else
             {
-                // Otherwise, we need to add a return self at the end after we generate bytecode for everything
+                // This is a top-level method, we need to add a return self at the end after we generate bytecode for everything
                 //
                 shouldReturnSelf = true;
             }
@@ -867,6 +1444,18 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
         {
             CompileTopLevelAssignation(ctx, bctx, assert_cast<AstAssignation*>(expr), clobberSlot);
         }
+        else if (expr->GetKind() == AstExprKind::UnaryCall)
+        {
+            CompileUnaryCall(ctx, bctx, assert_cast<AstUnaryCall*>(expr), clobberSlot, clobberSlot, true /*isTopLevel*/);
+        }
+        else if (expr->GetKind() == AstExprKind::BinaryCall)
+        {
+            CompileBinaryCall(ctx, bctx, assert_cast<AstBinaryCall*>(expr), clobberSlot, clobberSlot, true /*isTopLevel*/);
+        }
+        else if (expr->GetKind() == AstExprKind::KeywordCall)
+        {
+            CompileKeywordCall(ctx, bctx, assert_cast<AstKeywordCall*>(expr), clobberSlot, clobberSlot, true /*isTopLevel*/);
+        }
         else
         {
             CompileExpression(ctx, bctx, expr, clobberSlot, clobberSlot /*destSlot*/);
@@ -874,6 +1463,7 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
     }
     if (shouldReturnSelf)
     {
+        TestAssert(bctx.IsTopLevelMethod());
         if (bctx.MustEmitUpvalueCloseBeforeReturn())
         {
             ctx.m_builder.CreateUpvalueClose({
@@ -884,6 +1474,45 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
             .retStart = Local(0),
             .numRet = 1
         });
+    }
+}
+
+// If 'block' has any arguments excluding self, the arguments excluding self must have been initialized at 'frameStartSlot'
+//
+void InlineBlock(TranslationContext& ctx,
+                 BlockTranslationContext& bctx,
+                 AstNestedBlock* block,
+                 uint32_t frameStartSlot,
+                 uint32_t destSlot,
+                 bool mayDiscardReturnValue)
+{
+    ctx.UpdateTopSlot(destSlot);
+    ctx.UpdateTopSlot(frameStartSlot);
+
+    TestAssert(block->m_params.size() <= 2);
+
+    BlockTranslationContext* newBCtx = ctx.m_alloc.AllocateObject<BlockTranslationContext>(ctx.m_alloc,
+                                                                                           frameStartSlot /*startSlot*/,
+                                                                                           &bctx /*lexicalParent*/,
+                                                                                           bctx.m_owningContext /*owningContext*/,
+                                                                                           bctx.m_trueParent /*trueParent*/);
+
+    TestAssert(newBCtx->IsInlined());
+    newBCtx->m_returnValueMayBeDiscarded = mayDiscardReturnValue;
+    newBCtx->m_returnValueSlot = destSlot;
+
+    uint32_t firstFreeSlot = InstallLocalVariables(ctx, *newBCtx, block, frameStartSlot /*startSlot*/);
+    ctx.UpdateTopSlot(firstFreeSlot);
+
+    CompileBlockBody(ctx, *newBCtx, block, firstFreeSlot);
+
+    UninstallLocalVariables(ctx, *newBCtx, block);
+
+    TestAssert(newBCtx->m_uvs.size() == 0 && newBCtx->m_uvOrdMap.size() == 0);
+
+    if (newBCtx->m_blockMayThrow || newBCtx->m_containsThrowableBlocks)
+    {
+        bctx.m_containsThrowableBlocks = true;
     }
 }
 
@@ -920,7 +1549,7 @@ void CompileNewBlock(TranslationContext& ctx, BlockTranslationContext& bctx, Ast
     uint32_t firstFreeSlot = InstallLocalVariables(*newCtx, *newBCtx, block, 1 /*startSlot*/);
     newCtx->m_historyTopSlot = firstFreeSlot;
 
-    CompileBlockBody(*newCtx, *newBCtx, block, true /*isBlock*/, firstFreeSlot);
+    CompileBlockBody(*newCtx, *newBCtx, block, firstFreeSlot);
 
     UninstallLocalVariables(*newCtx, *newBCtx, block);
 
@@ -1025,7 +1654,7 @@ HeapPtr<FunctionObject> CompileMethod(TempArenaAllocator& alloc,
     uint32_t firstFreeSlot = InstallLocalVariables(*ctx, *bctx, meth, 1 /*startSlot*/);
     ctx->m_historyTopSlot = firstFreeSlot;
 
-    CompileBlockBody(*ctx, *bctx, meth, false /*isBlock*/, firstFreeSlot);
+    CompileBlockBody(*ctx, *bctx, meth, firstFreeSlot);
 
     UninstallLocalVariables(*ctx, *bctx, meth);
 

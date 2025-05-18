@@ -629,6 +629,24 @@ public:
     SOMUniquedString m_escapedBlockHandler;
 
     SOMPrimitivesContainer m_somPrimitives;
+
+    size_t m_stringIdForWhileTrue;
+    size_t m_stringIdForWhileFalse;
+    size_t m_stringIdForIfTrueIfFalse;
+    size_t m_stringIdForIfFalseIfTrue;
+    size_t m_stringIdForIfNilIfNotNil;
+    size_t m_stringIdForIfNotNilIfNil;
+    size_t m_stringIdForIfTrue;
+    size_t m_stringIdForIfFalse;
+    size_t m_stringIdForIfNil;
+    size_t m_stringIdForIfNotNil;
+    size_t m_stringIdForOperatorAnd;
+    size_t m_stringIdForOperatorOr;
+    size_t m_stringIdForMethodAnd;
+    size_t m_stringIdForMethodOr;
+    size_t m_stringIdForToDo;
+    size_t m_stringIdForDowntoDo;
+
     PerfTimer m_vmStartTime;
 
 #ifdef ENABLE_SOM_PROFILE_FREQUENCY
