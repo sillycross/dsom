@@ -600,6 +600,24 @@ public:
         return vec[idx];
     }
 
+    TValue* m_cachedSingleCharStrings;
+
+    static TValue* VM_GetCachedSingleCharStringArray()
+    {
+        TValue* vec = *reinterpret_cast<HeapPtr<TValue*>>(offsetof_member_v<&VM::m_cachedSingleCharStrings>);
+        return vec;
+    }
+
+    SOMUniquedString GetUniquedString(std::string_view str)
+    {
+        size_t ord = m_interner.InternString(str);
+        uint64_t hash = m_interner.GetHash(ord);
+        return SOMUniquedString {
+            .m_id = static_cast<uint32_t>(ord),
+            .m_hash = static_cast<uint32_t>(hash)
+        };
+    }
+
     // Hidden classes for various system classes, non-boxed types and function types
     //
     HeapPtr<SOMClass> m_stringHiddenClass;
@@ -628,7 +646,33 @@ public:
     SOMUniquedString m_doesNotUnderstandHandler;
     SOMUniquedString m_escapedBlockHandler;
 
-    SOMPrimitivesContainer m_somPrimitives;
+    bool IsSelectorArithmeticOperator(size_t ord)
+    {
+        return m_strOperatorPlus.m_id <= ord && ord <= m_strOperatorEqualEqual.m_id;
+    }
+
+    SOMUniquedString m_strOperatorPlus;
+    SOMUniquedString m_strOperatorMinus;
+    SOMUniquedString m_strOperatorStar;
+    SOMUniquedString m_strOperatorSlashSlash;
+    SOMUniquedString m_strOperatorPercent;
+    SOMUniquedString m_strOperatorAnd;
+    SOMUniquedString m_strOperatorEqual;
+    SOMUniquedString m_strOperatorLessThan;
+    SOMUniquedString m_strOperatorLessEqual;
+    SOMUniquedString m_strOperatorGreaterThan;
+    SOMUniquedString m_strOperatorGreaterEqual;
+    SOMUniquedString m_strOperatorUnequal;
+    SOMUniquedString m_strOperatorTildeUnequal;
+    SOMUniquedString m_strOperatorLeftShift;
+    SOMUniquedString m_strOperatorRightShift;
+    SOMUniquedString m_strOperatorBitwiseXor;
+    SOMUniquedString m_strOperatorEqualEqual;
+
+    bool IsSelectorInlinableControlFlow(size_t ord)
+    {
+        return m_stringIdForWhileTrue <= ord && ord <= m_stringIdForDowntoDo;
+    }
 
     size_t m_stringIdForWhileTrue;
     size_t m_stringIdForWhileFalse;
@@ -647,6 +691,31 @@ public:
     size_t m_stringIdForToDo;
     size_t m_stringIdForDowntoDo;
 
+    SOMUniquedString m_strOperatorLogicalAnd;
+    SOMUniquedString m_strOperatorLogicalOr;
+    SOMUniquedString m_strOperatorKeywordAnd;
+    SOMUniquedString m_strOperatorKeywordOr;
+    SOMUniquedString m_strOperatorValueColon;
+    SOMUniquedString m_strOperatorAtColon;
+    SOMUniquedString m_strOperatorCharAtColon;
+
+    bool IsSelectorSpecializableUnaryOperator(size_t ord)
+    {
+        return m_strOperatorAbs.m_id <= ord && ord <= m_strOperatorLength.m_id;
+    }
+
+    SOMUniquedString m_strOperatorAbs;
+    SOMUniquedString m_strOperatorSqrt;
+    SOMUniquedString m_strOperatorIsNil;
+    SOMUniquedString m_strOperatorNotNil;
+    SOMUniquedString m_strOperatorValue;
+    SOMUniquedString m_strOperatorNot;
+    SOMUniquedString m_strOperatorLength;
+
+    SOMUniquedString m_strOperatorAtPut;
+    SOMUniquedString m_strOperatorValueWith;
+
+    SOMPrimitivesContainer m_somPrimitives;
     PerfTimer m_vmStartTime;
 
 #ifdef ENABLE_SOM_PROFILE_FREQUENCY

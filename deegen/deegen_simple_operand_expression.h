@@ -197,7 +197,12 @@ struct LLVMValueToOperandExprMapper
             if (bcOp != nullptr)
             {
                 ReleaseAssert(!m_map.count(arg));
-                m_map[arg].push_back(SimpleOperandExprNode::CreateOperand(bcOp));
+                if (bcOp->GetKind() == BcOperandKind::BytecodeRangeBase ||
+                    bcOp->GetKind() == BcOperandKind::Literal ||
+                    bcOp->GetKind() == BcOperandKind::SpecializedLiteral)
+                {
+                    m_map[arg].push_back(SimpleOperandExprNode::CreateOperand(bcOp));
+                }
             }
         }
 

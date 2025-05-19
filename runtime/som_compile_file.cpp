@@ -36,12 +36,7 @@ void SetSOMGlobal(VM* vm, std::string_view key, TValue value)
 
 SOMUniquedString GetUniquedString(VM* vm, std::string_view str)
 {
-    size_t ord = vm->m_interner.InternString(str);
-    uint64_t hash = vm->m_interner.GetHash(ord);
-    return SOMUniquedString {
-        .m_id = static_cast<uint32_t>(ord),
-        .m_hash = static_cast<uint32_t>(hash)
-    };
+    return vm->GetUniquedString(str);
 }
 
 HeapPtr<FunctionObject> SOMGetMethodFromClass(SOMClass* c, std::string_view meth)
@@ -678,6 +673,22 @@ bool WARN_UNUSED ReceiverIsSuper(AstExpr* e)
     return (e->GetKind() == AstExprKind::VarUse && assert_cast<AstVariableUse*>(e)->m_varInfo.m_name == "super");
 }
 
+// Return true if 'expr' is a VariableUse that resolves to a local.
+// In which case, this function returns true, a read to the local is registered, and 'slot' will be stored the local variable ordinal
+//
+bool WARN_UNUSED DetectTrivialLocalVarUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* expr, uint32_t& slot /*output*/)
+{
+    if (expr->GetKind() == AstExprKind::VarUse &&
+        IsVariableResolvedToLocal(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name))
+    {
+        VarResolveResult vr = ResolveVariable(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name, true /*forRead*/);
+        TestAssert(vr.m_kind == VarUseKind::Local);
+        slot = vr.m_ord;
+        return true;
+    }
+    return false;
+}
+
 enum class SOMReceiverKind
 {
     Normal,
@@ -694,6 +705,8 @@ enum class SOMReceiverKind
 //
 void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* receiver, AstSymbol* selector, std::span<AstExpr*> args, uint32_t clobberSlot, uint32_t destSlot, bool isTopLevel = false)
 {
+    VM* vm = VM_GetActiveVMForCurrentThread();
+
     ctx.UpdateTopSlot(destSlot);
     ctx.UpdateTopSlot(static_cast<uint32_t>(clobberSlot + x_numSlotsForStackFrameHeader + args.size()));
     SOMReceiverKind rcvKind = SOMReceiverKind::Normal;
@@ -706,16 +719,19 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
         rcvKind = SOMReceiverKind::Super;
     }
 
-    // Inlining control flow structures is technically unsound, but allowed by Smalltalk standard and also done by SOM++/TruffleSOM etc.
-    // Also, even though Smalltalk standard allows these unsound inlining, I don't think SOM++ has did it exactly correctly (it's missing more checks).
+    size_t selectorStringId = selector->m_globalOrd;
+
+    // Inlining control flow structures is technically unsound,
+    // but allowed by Smalltalk standard ("restrictive selectors") and also done by SOM++/TruffleSOM etc.
+    // Also, even though Smalltalk standard allows these unsound inlining,
+    // I don't think SOM++ has did it exactly correctly (it's missing some checks).
     // But my goal here is to replicate SOM++ behavior so I'll just do whatever SOM++ did.
     //
     bool performUnsoundInlining = true;
 
-    if (performUnsoundInlining)
+    if (performUnsoundInlining && vm->IsSelectorInlinableControlFlow(selectorStringId) && rcvKind != SOMReceiverKind::Super)
     {
-        VM* vm = VM_GetActiveVMForCurrentThread();
-        size_t methId = selector->m_globalOrd;
+        size_t methId = selectorStringId;
         if (methId == vm->m_stringIdForIfTrue || methId == vm->m_stringIdForIfFalse ||
             methId == vm->m_stringIdForIfNil || methId == vm->m_stringIdForIfNotNil)
         {
@@ -725,7 +741,13 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                 AstNestedBlock* block = assert_cast<AstNestedBlock*>(args[0]);
                 if (block->m_params.size() == 0)
                 {
-                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    uint32_t condSlot;
+                    if (!DetectTrivialLocalVarUse(ctx, bctx, receiver, condSlot /*out*/))
+                    {
+                        condSlot = clobberSlot;
+                        CompileExpression(ctx, bctx, receiver, clobberSlot, condSlot /*destSlot*/);
+                    }
+
                     size_t branchBcLoc = ctx.m_builder.GetCurLength();
                     bool needExplicitElseBranch = false;
                     if (methId == vm->m_stringIdForIfFalse)
@@ -733,13 +755,13 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                         if (isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfTrue({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateStoreNilAndBranchIfTrue({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -748,7 +770,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfTrue({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
@@ -758,13 +780,13 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                         if (isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfFalse({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateStoreNilAndBranchIfFalse({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -773,23 +795,23 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfFalse({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
                     }
                     else if (methId == vm->m_stringIdForIfNil)
                     {
-                        if (clobberSlot == destSlot || isTopLevel)
+                        if (condSlot == destSlot || isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfNotNil({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateCopyAndBranchIfNotNil({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -798,7 +820,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfNotNil({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
@@ -806,16 +828,16 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                     else
                     {
                         TestAssert(methId == vm->m_stringIdForIfNotNil);
-                        if (clobberSlot == destSlot || isTopLevel)
+                        if (condSlot == destSlot || isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfNil({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateCopyAndBranchIfNil({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -824,7 +846,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfNil({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
@@ -861,7 +883,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                         {
                             TestAssert(methId == vm->m_stringIdForIfNil || methId == vm->m_stringIdForIfNotNil);
                             ctx.m_builder.CreateMov({
-                                .input = Local(clobberSlot),
+                                .input = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -886,31 +908,37 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                 AstNestedBlock* block2 = assert_cast<AstNestedBlock*>(args[1]);
                 if (block1->m_params.size() == 0 && block2->m_params.size() == 0)
                 {
-                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    uint32_t condSlot;
+                    if (!DetectTrivialLocalVarUse(ctx, bctx, receiver, condSlot /*out*/))
+                    {
+                        condSlot = clobberSlot;
+                        CompileExpression(ctx, bctx, receiver, clobberSlot, condSlot /*destSlot*/);
+                    }
+
                     size_t branchBcLoc = ctx.m_builder.GetCurLength();
                     if (methId == vm->m_stringIdForIfTrueIfFalse)
                     {
                         ctx.m_builder.CreateBranchIfFalse({
-                            .cond = Local(clobberSlot)
+                            .cond = Local(condSlot)
                         });
                     }
                     else if (methId == vm->m_stringIdForIfFalseIfTrue)
                     {
                         ctx.m_builder.CreateBranchIfTrue({
-                            .cond = Local(clobberSlot)
+                            .cond = Local(condSlot)
                         });
                     }
                     else if (methId == vm->m_stringIdForIfNilIfNotNil)
                     {
                         ctx.m_builder.CreateBranchIfNotNil({
-                            .cond = Local(clobberSlot)
+                            .cond = Local(condSlot)
                         });
                     }
                     else
                     {
                         TestAssert(methId == vm->m_stringIdForIfNotNilIfNil);
                         ctx.m_builder.CreateBranchIfNil({
-                            .cond = Local(clobberSlot)
+                            .cond = Local(condSlot)
                         });
                     }
                     InlineBlock(ctx, bctx, block1, clobberSlot, destSlot, isTopLevel /*mayDiscardReturnValue*/);
@@ -941,22 +969,28 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                 AstNestedBlock* block = assert_cast<AstNestedBlock*>(args[0]);
                 if (block->m_params.size() == 0)
                 {
-                    CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot /*destSlot*/);
+                    uint32_t condSlot;
+                    if (!DetectTrivialLocalVarUse(ctx, bctx, receiver, condSlot /*out*/))
+                    {
+                        condSlot = clobberSlot;
+                        CompileExpression(ctx, bctx, receiver, clobberSlot, condSlot /*destSlot*/);
+                    }
+
                     size_t branchBcLoc = ctx.m_builder.GetCurLength();
 
                     bool needExplicitElseBranch = false;
                     if (methId == vm->m_stringIdForMethodAnd || methId == vm->m_stringIdForOperatorAnd)
                     {
-                        if (clobberSlot == destSlot || isTopLevel)
+                        if (condSlot == destSlot || isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfFalse({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateCopyAndBranchIfFalse({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -965,7 +999,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfFalse({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
@@ -973,16 +1007,16 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                     else
                     {
                         TestAssert(methId == vm->m_stringIdForMethodOr || methId == vm->m_stringIdForOperatorOr);
-                        if (clobberSlot == destSlot || isTopLevel)
+                        if (condSlot == destSlot || isTopLevel)
                         {
                             ctx.m_builder.CreateBranchIfTrue({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                         }
                         else if (destSlot >= clobberSlot)
                         {
                             ctx.m_builder.CreateCopyAndBranchIfTrue({
-                                .cond = Local(clobberSlot),
+                                .cond = Local(condSlot),
                                 .output = Local(destSlot)
                             });
                         }
@@ -991,7 +1025,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             // It's not safe to early-clobber destSlot
                             //
                             ctx.m_builder.CreateBranchIfTrue({
-                                .cond = Local(clobberSlot)
+                                .cond = Local(condSlot)
                             });
                             needExplicitElseBranch = true;
                         }
@@ -1017,7 +1051,7 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                             abort();
                         }
                         ctx.m_builder.CreateMov({
-                            .input = Local(clobberSlot),
+                            .input = Local(condSlot),
                             .output = Local(destSlot)
                         });
                         if (unlikely(!ctx.m_builder.SetBranchTarget(elseBrLoc, ctx.m_builder.GetCurLength())))
@@ -1168,6 +1202,482 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
         }
     }
 
+    if (vm->IsSelectorArithmeticOperator(selectorStringId) && rcvKind != SOMReceiverKind::Super)
+    {
+        TestAssert(args.size() == 1);
+        // If lhs or rhs is constant but not integer/double
+        // skip since the fast path is known to not going to help
+        //
+        bool shouldSkip = false;
+        if (selectorStringId != vm->m_strOperatorEqualEqual.m_id)
+        {
+            if (selectorStringId == vm->m_strOperatorAnd.m_id ||
+                selectorStringId == vm->m_strOperatorLeftShift.m_id ||
+                selectorStringId == vm->m_strOperatorRightShift.m_id ||
+                selectorStringId == vm->m_strOperatorBitwiseXor.m_id)
+            {
+                if (receiver->IsLiteral() && receiver->GetKind() != AstExprKind::Integer)
+                {
+                    shouldSkip = true;
+                }
+                if (args[0]->IsLiteral() && args[0]->GetKind() != AstExprKind::Integer)
+                {
+                    shouldSkip = true;
+                }
+            }
+            else if (selectorStringId == vm->m_strOperatorEqual.m_id)
+            {
+                if (receiver->IsLiteral() &&
+                    receiver->GetKind() != AstExprKind::Integer && receiver->GetKind() != AstExprKind::Double &&
+                    receiver->GetKind() != AstExprKind::String && receiver->GetKind() != AstExprKind::Symbol)
+                {
+                    shouldSkip = true;
+                }
+                if (args[0]->IsLiteral() &&
+                    args[0]->GetKind() != AstExprKind::Integer && args[0]->GetKind() != AstExprKind::Double &&
+                    args[0]->GetKind() != AstExprKind::String && args[0]->GetKind() != AstExprKind::Symbol)
+                {
+                    shouldSkip = true;
+                }
+            }
+            else
+            {
+                if (receiver->IsLiteral() && receiver->GetKind() != AstExprKind::Integer && receiver->GetKind() != AstExprKind::Double)
+                {
+                    shouldSkip = true;
+                }
+                if (args[0]->IsLiteral() && args[0]->GetKind() != AstExprKind::Integer && args[0]->GetKind() != AstExprKind::Double)
+                {
+                    shouldSkip = true;
+                }
+            }
+        }
+
+        if (!shouldSkip)
+        {
+            uint32_t curClobberSlot = clobberSlot;
+            LocalOrCstWrapper lhs = Local(0);
+            LocalOrCstWrapper rhs = Local(0);
+            if (receiver->IsNonArrayLiteral())
+            {
+                lhs = CreateConstantNonArray(assert_cast<AstLiteral*>(receiver));
+            }
+            else
+            {
+                uint32_t localVarSlot;
+                if (DetectTrivialLocalVarUse(ctx, bctx, receiver, localVarSlot /*out*/))
+                {
+                    lhs = Local(localVarSlot);
+                }
+                else
+                {
+                    lhs = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, receiver, curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
+                }
+            }
+            if (args[0]->IsNonArrayLiteral())
+            {
+                rhs = CreateConstantNonArray(assert_cast<AstLiteral*>(args[0]));
+            }
+            else
+            {
+                uint32_t localVarSlot;
+                if (DetectTrivialLocalVarUse(ctx, bctx, args[0], localVarSlot /*out*/))
+                {
+                    rhs = Local(localVarSlot);
+                }
+                else
+                {
+                    rhs = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, args[0], curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
+                }
+            }
+            ctx.UpdateTopSlot(curClobberSlot);
+
+            if (selectorStringId == vm->m_strOperatorPlus.m_id)
+            {
+                ctx.m_builder.CreateOperatorPlus({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorMinus.m_id)
+            {
+                ctx.m_builder.CreateOperatorMinus({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorStar.m_id)
+            {
+                ctx.m_builder.CreateOperatorStar({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorSlashSlash.m_id)
+            {
+                ctx.m_builder.CreateOperatorSlashSlash({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorPercent.m_id)
+            {
+                ctx.m_builder.CreateOperatorPercent({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorAnd.m_id)
+            {
+                ctx.m_builder.CreateOperatorAnd({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorEqual.m_id)
+            {
+                ctx.m_builder.CreateOperatorEqual({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorLessThan.m_id)
+            {
+                ctx.m_builder.CreateOperatorLessThan({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorLessEqual.m_id)
+            {
+                ctx.m_builder.CreateOperatorLessEqual({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorGreaterThan.m_id)
+            {
+                ctx.m_builder.CreateOperatorGreaterThan({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorGreaterEqual.m_id)
+            {
+                ctx.m_builder.CreateOperatorGreaterEqual({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorUnequal.m_id)
+            {
+                ctx.m_builder.CreateOperatorUnequal({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorTildeUnequal.m_id)
+            {
+                ctx.m_builder.CreateOperatorTildeUnequal({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorLeftShift.m_id)
+            {
+                ctx.m_builder.CreateOperatorLeftShift({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorRightShift.m_id)
+            {
+                ctx.m_builder.CreateOperatorRightShift({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorBitwiseXor.m_id)
+            {
+                ctx.m_builder.CreateOperatorBitwiseXor({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else
+            {
+                TestAssert(selectorStringId == vm->m_strOperatorEqualEqual.m_id);
+                ctx.m_builder.CreateOperatorEqualEqual({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            return;
+        }
+    }
+
+    if (args.size() == 1 && rcvKind != SOMReceiverKind::Super)
+    {
+        // Try the other binary operators
+        // This must happen after trying control flow inlining,
+        // since if the RHS of &&/|| is a lexical block we should always inline it instead of using this.
+        //
+        if (selectorStringId == vm->m_strOperatorLogicalAnd.m_id ||
+            selectorStringId == vm->m_strOperatorKeywordAnd.m_id ||
+            selectorStringId == vm->m_strOperatorLogicalOr.m_id ||
+            selectorStringId == vm->m_strOperatorKeywordOr.m_id ||
+            selectorStringId == vm->m_strOperatorValueColon.m_id ||
+            selectorStringId == vm->m_strOperatorAtColon.m_id ||
+            selectorStringId == vm->m_strOperatorCharAtColon.m_id)
+        {
+            uint32_t curClobberSlot = clobberSlot;
+            Local lhs = Local(0);
+            LocalOrCstWrapper rhs = Local(0);
+            {
+                uint32_t localVarSlot;
+                if (DetectTrivialLocalVarUse(ctx, bctx, receiver, localVarSlot /*out*/))
+                {
+                    lhs = Local(localVarSlot);
+                }
+                else
+                {
+                    lhs = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, receiver, curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
+                }
+            }
+            // The bytecode supports constant RHS only if the operator is value: at: or char:
+            //
+            if (args[0]->IsNonArrayLiteral() && (selectorStringId == vm->m_strOperatorValueColon.m_id ||
+                                                 selectorStringId == vm->m_strOperatorAtColon.m_id ||
+                                                 selectorStringId == vm->m_strOperatorCharAtColon.m_id))
+            {
+                rhs = CreateConstantNonArray(assert_cast<AstLiteral*>(args[0]));
+            }
+            else
+            {
+                uint32_t localVarSlot;
+                if (DetectTrivialLocalVarUse(ctx, bctx, args[0], localVarSlot /*out*/))
+                {
+                    rhs = Local(localVarSlot);
+                }
+                else
+                {
+                    rhs = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, args[0], curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
+                }
+            }
+            ctx.UpdateTopSlot(curClobberSlot);
+
+            if (selectorStringId == vm->m_strOperatorLogicalAnd.m_id)
+            {
+                ctx.m_builder.CreateOperatorLogicalAnd({
+                    .lhs = lhs,
+                    .rhs = rhs.AsLocal(),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorKeywordAnd.m_id)
+            {
+                ctx.m_builder.CreateOperatorKeywordAnd({
+                    .lhs = lhs,
+                    .rhs = rhs.AsLocal(),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorLogicalOr.m_id)
+            {
+                ctx.m_builder.CreateOperatorLogicalOr({
+                    .lhs = lhs,
+                    .rhs = rhs.AsLocal(),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorKeywordOr.m_id)
+            {
+                ctx.m_builder.CreateOperatorKeywordOr({
+                    .lhs = lhs,
+                    .rhs = rhs.AsLocal(),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorValueColon.m_id)
+            {
+                ctx.m_builder.CreateOperatorValueColon({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorAtColon.m_id)
+            {
+                ctx.m_builder.CreateOperatorAtColon({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            else
+            {
+                TestAssert(selectorStringId == vm->m_strOperatorCharAtColon.m_id);
+                ctx.m_builder.CreateOperatorCharAtColon({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
+            return;
+        }
+    }
+
+    if (args.size() == 0 && rcvKind != SOMReceiverKind::Super)
+    {
+        if (vm->IsSelectorSpecializableUnaryOperator(selectorStringId))
+        {
+            uint32_t lhsSlot;
+            if (!DetectTrivialLocalVarUse(ctx, bctx, receiver, lhsSlot /*out*/))
+            {
+                lhsSlot = clobberSlot;
+                CompileExpression(ctx, bctx, receiver, clobberSlot, clobberSlot);
+            }
+            if (selectorStringId == vm->m_strOperatorAbs.m_id)
+            {
+                ctx.m_builder.CreateOperatorAbs({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorSqrt.m_id)
+            {
+                ctx.m_builder.CreateOperatorSqrt({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorIsNil.m_id)
+            {
+                ctx.m_builder.CreateOperatorIsNil({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorNotNil.m_id)
+            {
+                ctx.m_builder.CreateOperatorNotNil({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorValue.m_id)
+            {
+                ctx.m_builder.CreateOperatorValue({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else if (selectorStringId == vm->m_strOperatorNot.m_id)
+            {
+                ctx.m_builder.CreateOperatorNot({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            else
+            {
+                TestAssert(selectorStringId == vm->m_strOperatorLength.m_id);
+                ctx.m_builder.CreateOperatorLength({
+                    .op = Local(lhsSlot),
+                    .output = Local(destSlot)
+                });
+            }
+            return;
+        }
+    }
+
+    if (args.size() == 2 && rcvKind != SOMReceiverKind::Super)
+    {
+        if (selectorStringId == vm->m_strOperatorAtPut.m_id ||
+            selectorStringId == vm->m_strOperatorValueWith.m_id)
+        {
+            uint32_t curClobberSlot = clobberSlot;
+            uint32_t opSlot;
+            if (!DetectTrivialLocalVarUse(ctx, bctx, receiver, opSlot /*out*/))
+            {
+                opSlot = curClobberSlot;
+                CompileExpression(ctx, bctx, receiver, curClobberSlot, curClobberSlot);
+                curClobberSlot++;
+            }
+            auto compileArg = [&](AstExpr* expr) ALWAYS_INLINE -> LocalOrCstWrapper
+            {
+                if (expr->IsNonArrayLiteral())
+                {
+                    return CreateConstantNonArray(assert_cast<AstLiteral*>(expr));
+                }
+                else
+                {
+                    uint32_t localVarSlot;
+                    if (DetectTrivialLocalVarUse(ctx, bctx, expr, localVarSlot /*out*/))
+                    {
+                        return Local(localVarSlot);
+                    }
+                    else
+                    {
+                        Local res = Local(curClobberSlot);
+                        CompileExpression(ctx, bctx, expr, curClobberSlot, curClobberSlot);
+                        curClobberSlot++;
+                        return res;
+                    }
+                }
+            };
+            LocalOrCstWrapper arg1 = compileArg(args[0]);
+            LocalOrCstWrapper arg2 = compileArg(args[1]);
+            ctx.UpdateTopSlot(curClobberSlot);
+
+            if (selectorStringId == vm->m_strOperatorAtPut.m_id)
+            {
+                ctx.m_builder.CreateOperatorAtPut({
+                    .op = Local(opSlot),
+                    .arg1 = arg1,
+                    .arg2 = arg2,
+                    .output = Local(destSlot)
+                });
+            }
+            else
+            {
+                TestAssert(selectorStringId == vm->m_strOperatorValueWith.m_id);
+                ctx.m_builder.CreateOperatorValueWith({
+                    .op = Local(opSlot),
+                    .arg1 = arg1,
+                    .arg2 = arg2,
+                    .output = Local(destSlot)
+                });
+            }
+            return;
+        }
+    }
+
     uint32_t argBase = clobberSlot + x_numSlotsForStackFrameHeader;
     if (rcvKind == SOMReceiverKind::Normal)
     {
@@ -1181,10 +1691,9 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
         curArgDest++;
     }
 
-    VM* vm = VM_GetActiveVMForCurrentThread();
     SOMUniquedString meth {
-        .m_id = static_cast<uint32_t>(selector->m_globalOrd),
-        .m_hash = static_cast<uint32_t>(vm->m_interner.GetHash(selector->m_globalOrd))
+        .m_id = static_cast<uint32_t>(selectorStringId),
+        .m_hash = static_cast<uint32_t>(vm->m_interner.GetHash(selectorStringId))
     };
     TValue tv;
     tv.m_value = UnalignedLoad<uint64_t>(&meth);
@@ -1210,6 +1719,10 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
     }
     else
     {
+        // TODO: this is nonsense. For a super call, we statically know the callee.
+        // We should just pass the callee function, or if it is a trivial method, directly do the trivial method logic
+        // (or if the method doesn't exist, trigger doesNotUnderstand)
+        //
         TestAssert(rcvKind == SOMReceiverKind::Super);
         TestAssert(ctx.m_superClass != nullptr);
         TValue scTv; scTv.m_value = SystemHeapPointer<SOMClass>(ctx.m_superClass).m_value;
@@ -2194,10 +2707,6 @@ SOMInitializationResult SOMBootstrapClassHierarchy()
 
     SOMObject* systemInstance = systemClass->Instantiate();
     SetSOMGlobal(vm, "system", TValue::Create<tObject>(TranslateToHeapPtr(systemInstance)));
-
-    vm->m_unknownGlobalHandler = GetUniquedString(vm, "unknownGlobal:");
-    vm->m_doesNotUnderstandHandler = GetUniquedString(vm, "doesNotUnderstand:arguments:");
-    vm->m_escapedBlockHandler = GetUniquedString(vm, "escapedBlock:");
 
     return {
         .m_systemClass = systemClass,

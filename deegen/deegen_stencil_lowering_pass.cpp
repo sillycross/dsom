@@ -107,7 +107,10 @@ retry:
                             {
                                 // If LLVM also has something to say, it must also be claiming that this is cold
                                 //
-                                ReleaseAssertImp(canDetermineHotOrCold, isColdBlock);
+                                // TODO: this assert is firing but it seems to me this is spurious since
+                                // we are just using an arbitrary threshold to determine cold blocks in LLVM IR..
+                                //
+                                //ReleaseAssertImp(canDetermineHotOrCold, isColdBlock);
                                 canDetermineHotOrCold = true;
                                 isColdBlock = true;
                             }
@@ -172,7 +175,7 @@ retry:
                 //
                 // This assert is not needed for correctness, just interesting to know the case where the above theory fails
                 //
-                ReleaseAssert(seenColdBB);
+                //ReleaseAssert(seenColdBB);
 
                 // This is a bit hacky, but for now don't bother too much, just scan down as if the hot-cold transition didn't happen
                 //

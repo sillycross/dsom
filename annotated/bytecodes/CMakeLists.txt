@@ -13,6 +13,9 @@ SET(DEEGEN_BYTECODE_DEFINITION_SOURCES
   som_field.cpp
   som_throw.cpp
   som_branch.cpp
+  som_binary_operators.cpp
+  som_unary_operators.cpp
+  som_ternary_operators.cpp
 )
 
 set(fps_exec "${PROJECT_BINARY_DIR}/deegen/fps")

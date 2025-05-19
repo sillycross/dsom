@@ -307,22 +307,76 @@ bool WARN_UNUSED VM::InitializeVMGlobalData()
     m_systemClass = nullptr;
     m_metaclassClassLoaded = false;
 
+    m_cachedSingleCharStrings = new TValue[256];
+    memset(m_cachedSingleCharStrings, 0, sizeof(TValue) * 256);
+
+    m_unknownGlobalHandler = GetUniquedString("unknownGlobal:");
+    m_doesNotUnderstandHandler = GetUniquedString("doesNotUnderstand:arguments:");
+    m_escapedBlockHandler = GetUniquedString("escapedBlock:");
+
+    // If you add new stuffs here, make sure to change IsSelectorArithmeticOperator correspondingly.
+    //
+    m_strOperatorPlus = GetUniquedString("+");
+    m_strOperatorMinus = GetUniquedString("-"); ReleaseAssert(m_strOperatorMinus.m_id == m_strOperatorPlus.m_id + 1);
+    m_strOperatorStar = GetUniquedString("*"); ReleaseAssert(m_strOperatorStar.m_id == m_strOperatorMinus.m_id + 1);
+    m_strOperatorSlashSlash = GetUniquedString("//"); ReleaseAssert(m_strOperatorSlashSlash.m_id == m_strOperatorStar.m_id + 1);
+    m_strOperatorPercent = GetUniquedString("%"); ReleaseAssert(m_strOperatorPercent.m_id == m_strOperatorSlashSlash.m_id + 1);
+    m_strOperatorAnd = GetUniquedString("&"); ReleaseAssert(m_strOperatorAnd.m_id == m_strOperatorPercent.m_id + 1);
+    m_strOperatorEqual = GetUniquedString("="); ReleaseAssert(m_strOperatorEqual.m_id == m_strOperatorAnd.m_id + 1);
+    m_strOperatorLessThan = GetUniquedString("<"); ReleaseAssert(m_strOperatorLessThan.m_id == m_strOperatorEqual.m_id + 1);
+    m_strOperatorLessEqual = GetUniquedString("<="); ReleaseAssert(m_strOperatorLessEqual.m_id == m_strOperatorLessThan.m_id + 1);
+    m_strOperatorGreaterThan = GetUniquedString(">"); ReleaseAssert(m_strOperatorGreaterThan.m_id == m_strOperatorLessEqual.m_id + 1);
+    m_strOperatorGreaterEqual = GetUniquedString(">="); ReleaseAssert(m_strOperatorGreaterEqual.m_id == m_strOperatorGreaterThan.m_id + 1);
+    m_strOperatorUnequal = GetUniquedString("<>"); ReleaseAssert(m_strOperatorUnequal.m_id == m_strOperatorGreaterEqual.m_id + 1);
+    m_strOperatorTildeUnequal = GetUniquedString("~="); ReleaseAssert(m_strOperatorTildeUnequal.m_id == m_strOperatorUnequal.m_id + 1);
+    m_strOperatorLeftShift = GetUniquedString("<<"); ReleaseAssert(m_strOperatorLeftShift.m_id == m_strOperatorTildeUnequal.m_id + 1);
+    m_strOperatorRightShift = GetUniquedString(">>>"); ReleaseAssert(m_strOperatorRightShift.m_id == m_strOperatorLeftShift.m_id + 1);
+    m_strOperatorBitwiseXor = GetUniquedString("bitXor:"); ReleaseAssert(m_strOperatorBitwiseXor.m_id == m_strOperatorRightShift.m_id + 1);
+    m_strOperatorEqualEqual = GetUniquedString("=="); ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorBitwiseXor.m_id + 1);
+    ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorPlus.m_id + 16);
+
+    // If you add new stuffs here, make sure to change IsSelectorInlinableControlFlow correspondingly.
+    //
     m_stringIdForWhileTrue = m_interner.InternString("whileTrue:");
-    m_stringIdForWhileFalse = m_interner.InternString("whileFalse:");
-    m_stringIdForIfTrueIfFalse = m_interner.InternString("ifTrue:ifFalse:");
-    m_stringIdForIfFalseIfTrue = m_interner.InternString("ifFalse:ifTrue:");
-    m_stringIdForIfNilIfNotNil = m_interner.InternString("ifNil:ifNotNil:");
-    m_stringIdForIfNotNilIfNil = m_interner.InternString("ifNotNil:ifNil:");
-    m_stringIdForIfTrue = m_interner.InternString("ifTrue:");
-    m_stringIdForIfFalse = m_interner.InternString("ifFalse:");
-    m_stringIdForIfNil = m_interner.InternString("ifNil:");
-    m_stringIdForIfNotNil = m_interner.InternString("ifNotNil:");
-    m_stringIdForOperatorAnd = m_interner.InternString("&&");
-    m_stringIdForOperatorOr = m_interner.InternString("||");
-    m_stringIdForMethodAnd = m_interner.InternString("and:");
-    m_stringIdForMethodOr = m_interner.InternString("or:");
-    m_stringIdForToDo = m_interner.InternString("to:do:");
-    m_stringIdForDowntoDo = m_interner.InternString("downTo:do:");
+    m_stringIdForWhileFalse = m_interner.InternString("whileFalse:"); ReleaseAssert(m_stringIdForWhileFalse == m_stringIdForWhileTrue + 1);
+    m_stringIdForIfTrueIfFalse = m_interner.InternString("ifTrue:ifFalse:"); ReleaseAssert(m_stringIdForIfTrueIfFalse == m_stringIdForWhileFalse + 1);
+    m_stringIdForIfFalseIfTrue = m_interner.InternString("ifFalse:ifTrue:"); ReleaseAssert(m_stringIdForIfFalseIfTrue == m_stringIdForIfTrueIfFalse + 1);
+    m_stringIdForIfNilIfNotNil = m_interner.InternString("ifNil:ifNotNil:"); ReleaseAssert(m_stringIdForIfNilIfNotNil == m_stringIdForIfFalseIfTrue + 1);
+    m_stringIdForIfNotNilIfNil = m_interner.InternString("ifNotNil:ifNil:"); ReleaseAssert(m_stringIdForIfNotNilIfNil == m_stringIdForIfNilIfNotNil + 1);
+    m_stringIdForIfTrue = m_interner.InternString("ifTrue:"); ReleaseAssert(m_stringIdForIfTrue == m_stringIdForIfNotNilIfNil + 1);
+    m_stringIdForIfFalse = m_interner.InternString("ifFalse:"); ReleaseAssert(m_stringIdForIfFalse == m_stringIdForIfTrue + 1);
+    m_stringIdForIfNil = m_interner.InternString("ifNil:"); ReleaseAssert(m_stringIdForIfNil == m_stringIdForIfFalse + 1);
+    m_stringIdForIfNotNil = m_interner.InternString("ifNotNil:"); ReleaseAssert(m_stringIdForIfNotNil == m_stringIdForIfNil + 1);
+    m_stringIdForOperatorAnd = m_interner.InternString("&&"); ReleaseAssert(m_stringIdForOperatorAnd == m_stringIdForIfNotNil + 1);
+    m_stringIdForOperatorOr = m_interner.InternString("||"); ReleaseAssert(m_stringIdForOperatorOr == m_stringIdForOperatorAnd + 1);
+    m_stringIdForMethodAnd = m_interner.InternString("and:"); ReleaseAssert(m_stringIdForMethodAnd == m_stringIdForOperatorOr + 1);
+    m_stringIdForMethodOr = m_interner.InternString("or:"); ReleaseAssert(m_stringIdForMethodOr == m_stringIdForMethodAnd + 1);
+    m_stringIdForToDo = m_interner.InternString("to:do:"); ReleaseAssert(m_stringIdForToDo == m_stringIdForMethodOr + 1);
+    m_stringIdForDowntoDo = m_interner.InternString("downTo:do:"); ReleaseAssert(m_stringIdForDowntoDo == m_stringIdForToDo + 1);
+    ReleaseAssert(m_stringIdForDowntoDo == m_stringIdForWhileTrue + 15);
+
+    // Note that "&&", "||", "and:", and "or:" are also inlinable control flow structure
+    //
+    m_strOperatorLogicalAnd = GetUniquedString("&&");
+    m_strOperatorLogicalOr = GetUniquedString("||");
+    m_strOperatorKeywordAnd = GetUniquedString("and:");
+    m_strOperatorKeywordOr = GetUniquedString("or:");
+    m_strOperatorValueColon = GetUniquedString("value:");
+    m_strOperatorAtColon = GetUniquedString("at:");
+    m_strOperatorCharAtColon = GetUniquedString("charAt:");
+
+    // If you add new stuffs here, make sure to change IsSelectorSpecializableUnaryOperator correspondingly.
+    //
+    m_strOperatorAbs = GetUniquedString("abs");
+    m_strOperatorSqrt = GetUniquedString("sqrt"); ReleaseAssert(m_strOperatorSqrt.m_id == m_strOperatorAbs.m_id + 1);
+    m_strOperatorIsNil = GetUniquedString("isNil"); ReleaseAssert(m_strOperatorIsNil.m_id == m_strOperatorSqrt.m_id + 1);
+    m_strOperatorNotNil = GetUniquedString("notNil"); ReleaseAssert(m_strOperatorNotNil.m_id == m_strOperatorIsNil.m_id + 1);
+    m_strOperatorValue = GetUniquedString("value"); ReleaseAssert(m_strOperatorValue.m_id == m_strOperatorNotNil.m_id + 1);
+    m_strOperatorNot = GetUniquedString("not"); ReleaseAssert(m_strOperatorNot.m_id == m_strOperatorValue.m_id + 1);
+    m_strOperatorLength = GetUniquedString("length"); ReleaseAssert(m_strOperatorLength.m_id == m_strOperatorNot.m_id + 1);
+
+    m_strOperatorAtPut = GetUniquedString("at:put:");
+    m_strOperatorValueWith = GetUniquedString("value:with:");
 
     CreateRootCoroutine();
     return true;
