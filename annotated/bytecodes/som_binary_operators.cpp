@@ -279,6 +279,7 @@ static void NO_RETURN ArithBinOpImpl(TValue lhs, TValue rhs)
 
                 size_t len = r->m_data[0].m_value;
                 if (len != l->m_data[0].m_value) { Return(TValue::Create<tBool>(false)); }
+                if (len == 1) { Return(TValue::Create<tBool>(*reinterpret_cast<HeapPtr<char>>(&l->m_data[1]) == *reinterpret_cast<HeapPtr<char>>(&r->m_data[1]))); }
 
                 VM* vm = VM_GetActiveVMForCurrentThread();
                 int res = memcmp(TranslateToRawPointer(vm, &l->m_data[1]), TranslateToRawPointer(vm, &r->m_data[1]), len);
