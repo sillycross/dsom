@@ -45,12 +45,16 @@ static void NO_RETURN CallImpl(TValue* base, TValue methTv, uint16_t numArgs)
             EnterSlowPath<CallBaseNotObjectSlowPath>();
         }
         case SOM_NormalMethod:
-        case SOM_LiteralReturn:     // TODO: provide specialized impls
-        case SOM_GlobalReturn:
-        case SOM_Getter:
-        case SOM_Setter:
         {
             MakeInPlaceCall(fn, base + x_numSlotsForStackFrameHeader, numArgs, CallReturnContinuation);
+        }
+        case SOM_Setter:
+        {
+            Return(ExecuteSetterTrivialMethod(fn, self, base[x_numSlotsForStackFrameHeader + 1]));
+        }
+        default:
+        {
+            Return(ExecuteTrivialMethodExceptSetter(fn, self, fnKind));
         }
         }   /*switch*/
     }

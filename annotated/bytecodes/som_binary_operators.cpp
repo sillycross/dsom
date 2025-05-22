@@ -30,6 +30,7 @@ enum class BinOpKind
     LeftShift,      // <<
     RightShift,     // >>>
     BitwiseXor,     // bitXor:
+    Slash,          // /
     // Other non-arithmetic common binary operators that are worth providing a fast path for
     //
     LogicalAnd,     // &&
@@ -82,6 +83,7 @@ static SOMUniquedString ALWAYS_INLINE WARN_UNUSED GetLookupKeyForBinaryOperator(
     case BinOpKind::LeftShift: return vm->m_strOperatorLeftShift;
     case BinOpKind::RightShift: return vm->m_strOperatorRightShift;
     case BinOpKind::BitwiseXor: return vm->m_strOperatorBitwiseXor;
+    case BinOpKind::Slash: return vm->m_strOperatorSlash;
     case BinOpKind::LogicalAnd: return vm->m_strOperatorLogicalAnd;
     case BinOpKind::LogicalOr: return vm->m_strOperatorLogicalOr;
     case BinOpKind::KeywordAnd: return vm->m_strOperatorKeywordAnd;
@@ -134,6 +136,7 @@ static void ALWAYS_INLINE DoIntegerIntegerArithOp(int32_t lhs, int32_t rhs)
     case BinOpKind::LeftShift: { Return(TValue::Create<tInt32>(lhs << rhs)); }
     case BinOpKind::RightShift: { Return(TValue::Create<tInt32>(lhs >> rhs)); }
     case BinOpKind::BitwiseXor: { Return(TValue::Create<tInt32>(lhs ^ rhs)); }
+    case BinOpKind::Slash: { Return(TValue::Create<tInt32>(lhs / rhs)); }
     default: { break; }     // not an arithmetic binary operator, shouldn't reach here
     }   /*switch*/
 }
@@ -159,6 +162,7 @@ static void ALWAYS_INLINE DoIntegerDoubleArithOp(int32_t lhs, double rhs)
     case BinOpKind::LeftShift: { break; }   // same as And, also below
     case BinOpKind::RightShift: { break; }
     case BinOpKind::BitwiseXor: { break; }
+    case BinOpKind::Slash: { Return(TValue::Create<tInt32>(lhs / static_cast<int32_t>(rhs))); }
     default: { break; }     // not an arithmetic binary operator, shouldn't reach here
     }   /*switch*/
 }
@@ -184,6 +188,7 @@ static void ALWAYS_INLINE DoDoubleArithOp(double lhs, double rhs)
     case BinOpKind::LeftShift: { break; }
     case BinOpKind::RightShift: { break; }
     case BinOpKind::BitwiseXor: { break; }
+    case BinOpKind::Slash: { break; }
     default: { break; }     // not an arithmetic binary operator, shouldn't reach here
     }   /*switch*/
 }
@@ -231,7 +236,7 @@ static void ALWAYS_INLINE DoDoubleArithOp(double lhs, TValue rhs)
 template<BinOpKind kind>
 static void NO_RETURN ArithBinOpImpl(TValue lhs, TValue rhs)
 {
-    if constexpr(kind == BinOpKind::And || kind == BinOpKind::LeftShift || kind == BinOpKind::RightShift || kind == BinOpKind::BitwiseXor)
+    if constexpr(kind == BinOpKind::And || kind == BinOpKind::LeftShift || kind == BinOpKind::RightShift || kind == BinOpKind::BitwiseXor || kind == BinOpKind::Slash)
     {
         // These operators are only defined on integer in the standard library, everything else must be handled by slow path
         //
@@ -346,6 +351,7 @@ DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(OperatorTildeUnequal, ArithBinO
 DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(OperatorLeftShift, ArithBinOp, BinOpKind::LeftShift);
 DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(OperatorRightShift, ArithBinOp, BinOpKind::RightShift);
 DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(OperatorBitwiseXor, ArithBinOp, BinOpKind::BitwiseXor);
+DEEGEN_DEFINE_BYTECODE_BY_TEMPLATE_INSTANTIATION(OperatorSlash, ArithBinOp, BinOpKind::Slash);
 
 // operator == is always object equality and it's UB to specialize it
 // (see ANSI Smalltalk standard on restrictive selectors)
@@ -549,12 +555,35 @@ static void NO_RETURN MiscBinOpImpl(TValue lhs, TValue rhs)
                     return std::make_pair(SOM_MethodNotFound, Undef<HeapPtr<FunctionObject>>());
                 }
                 uint8_t c_funcTy = f.As()->m_invalidArrayType >> 4;
-                int32_t c_result = f.m_value;
-                return ic->Effect([c_funcTy, c_result] {
-                    IcSpecializeValueFullCoverage(c_funcTy, SOM_NormalMethod, SOM_LiteralReturn, SOM_GlobalReturn, SOM_Getter, SOM_Setter);
-                    IcSpecifyCaptureValueRange(c_result, -2000000000, 0);
-                    return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), GeneralHeapPointer<FunctionObject>(c_result).As());
-                });
+                if (c_funcTy == SOM_GlobalReturn)
+                {
+                    Assert(f.As()->m_numUpvalues == 1);
+                    TValue r = VM::VM_GetGlobal(f.As()->m_upvalues[0].m_value);
+                    if (r.m_value == TValue::CreateImpossibleValue().m_value)
+                    {
+                        return std::make_pair(SOM_NormalMethod, f.As());
+                    }
+                }
+
+                if (c_funcTy == SOM_GlobalReturn || c_funcTy == SOM_Getter || c_funcTy == SOM_Setter)
+                {
+                    Assert(f.As()->m_numUpvalues == 1);
+                    int32_t c_result = SafeIntegerCast<int32_t>(f.As()->m_upvalues[0].m_value);
+                    return ic->Effect([c_funcTy, c_result] {
+                        IcSpecializeValueFullCoverage(c_funcTy, SOM_GlobalReturn, SOM_Getter, SOM_Setter);
+                        IcSpecifyCaptureValueRange(c_result, 0, 100000000);
+                        return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), reinterpret_cast<HeapPtr<FunctionObject>>(static_cast<uint64_t>(c_result)));
+                    });
+                }
+                else
+                {
+                    int32_t c_result = f.m_value;
+                    return ic->Effect([c_funcTy, c_result] {
+                        IcSpecializeValueFullCoverage(c_funcTy, SOM_NormalMethod, SOM_LiteralReturn, SOM_SelfReturn);
+                        IcSpecifyCaptureValueRange(c_result, -2000000000, 0);
+                        return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), GeneralHeapPointer<FunctionObject>(c_result).As());
+                    });
+                }
             });
 
         switch (fnKind)
@@ -568,12 +597,16 @@ static void NO_RETURN MiscBinOpImpl(TValue lhs, TValue rhs)
             EnterSlowPath<BinOpGeneralSlowPath<kind>>();
         }
         case SOM_NormalMethod:
-        case SOM_LiteralReturn:     // TODO: provide specialized impls
-        case SOM_GlobalReturn:
-        case SOM_Getter:
-        case SOM_Setter:
         {
             MakeCall(fn, lhs, rhs, BinOpCallReturnContinuation);
+        }
+        case SOM_Setter:
+        {
+            Return(ExecuteSetterTrivialMethod(fn, lhs, rhs));
+        }
+        default:
+        {
+            Return(ExecuteTrivialMethodExceptSetter(fn, lhs, fnKind));
         }
         }   /*switch*/
     }

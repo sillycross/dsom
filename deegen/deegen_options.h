@@ -14,7 +14,7 @@
 //
 // TODO: currently the JIT logic is still generated, just unused. We should make this option skip the generation of the JIT tiers altogether.
 //
-constexpr bool x_allow_interpreter_tier_up_to_baseline_jit = false;
+constexpr bool x_allow_interpreter_tier_up_to_baseline_jit = true;
 
 // When this option is false, the baseline JIT won't tier up to the optimizing JIT,
 // so the VM will run in interpreter & baseline JIT mode.

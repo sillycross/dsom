@@ -397,44 +397,48 @@ enum class VarUseKind
     Field,
     // The variable does not resolve to anything above, so it's a global read or invalid write
     //
-    Global
+    Global,
+    // The variable resolves to global 'true'/'false'/'nil',
+    // which are assumed by SOM++/TruffleSOM to always hold the respective constant values
+    //
+    FalseTrueNil
 };
 
 struct VarResolveResult
 {
     VarUseKind m_kind;
+    // For m_kind == FalseTrueNil, m_ord = 0 means false, m_ord = 1 means true, m_ord = 2 means nil
+    //
     uint32_t m_ord;
+
+    static VarResolveResult GetForFalse() { return { .m_kind = VarUseKind::FalseTrueNil, .m_ord = 0 }; }
+    static VarResolveResult GetForTrue() { return { .m_kind = VarUseKind::FalseTrueNil, .m_ord = 1 }; }
+    static VarResolveResult GetForNil() { return { .m_kind = VarUseKind::FalseTrueNil, .m_ord = 2 }; }
+
+    TValue GetTValueForFalseTrueNil()
+    {
+        TestAssert(m_kind == VarUseKind::FalseTrueNil);
+        if (m_ord == 0) { return TValue::Create<tBool>(false); }
+        if (m_ord == 1) { return TValue::Create<tBool>(true); }
+        TestAssert(m_ord == 2);
+        return TValue::Create<tNil>();
+    }
 };
 
-bool WARN_UNUSED IsVariableResolvedToLocal(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+enum class VarResolveMode
+{
+    ForRead,
+    ForWrite,
+    // Does not record a read or write for the variable
+    //
+    DryRun
+};
+
+VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName, VarResolveMode mode)
 {
     if (varName == "self" || varName == "super")
     {
-        return true;
-    }
-    auto it = ctx.m_localVarMap.find(varName);
-    if (it != ctx.m_localVarMap.end() && !it->second.empty())
-    {
-        LocalVarInfo* var = it->second.back();
-        return var->m_bctx->m_owningContext == bctx.m_owningContext;
-    }
-    return false;
-}
-
-bool WARN_UNUSED IsVariableResolvedToLocalOrField(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
-{
-    if (IsVariableResolvedToLocal(ctx, bctx, varName))
-    {
-        return true;
-    }
-    return ctx.m_fieldMap.count(varName);
-}
-
-VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName, bool forRead)
-{
-    if (varName == "self" || varName == "super")
-    {
-        if (!forRead)
+        if (mode == VarResolveMode::ForWrite)
         {
             fprintf(stderr, "Write to 'self' or 'super' is not allowed!\n");
             abort();
@@ -452,11 +456,11 @@ VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTrans
         if (it != ctx.m_localVarMap.end() && !it->second.empty())
         {
             LocalVarInfo* var = it->second.back();
-            if (forRead)
+            if (mode == VarResolveMode::ForRead)
             {
                 var->NotifyUse();
             }
-            else
+            else if (mode == VarResolveMode::ForWrite)
             {
                 var->NotifyWrite(&bctx == var->m_bctx /*isInDefiningBlock*/);
             }
@@ -464,7 +468,7 @@ VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTrans
             {
                 // This is a variable defined in an outer function
                 //
-                TestAssertImp(!forRead, !var->m_isImmutable);
+                TestAssertImp(mode == VarResolveMode::ForWrite, !var->m_isImmutable);
                 size_t uvOrd = bctx.m_owningContext->AddUpvalue(var);
                 return VarResolveResult {
                     .m_kind = VarUseKind::Upvalue,
@@ -492,8 +496,11 @@ VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTrans
             };
         }
     }
-    if (forRead)
+    if (mode != VarResolveMode::ForWrite)
     {
+        if (varName == "false") { return VarResolveResult::GetForFalse(); }
+        if (varName == "true") { return VarResolveResult::GetForTrue(); }
+        if (varName == "nil") { return VarResolveResult::GetForNil(); }
         VM* vm = VM_GetActiveVMForCurrentThread();
         size_t slotForGlobal = vm->GetSlotForGlobal(varName);
         return VarResolveResult {
@@ -508,10 +515,80 @@ VarResolveResult WARN_UNUSED ResolveVariable(TranslationContext& ctx, BlockTrans
     }
 }
 
+bool WARN_UNUSED IsVariableResolvedToLocal(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+{
+    VarResolveResult vr = ResolveVariable(ctx, bctx, varName, VarResolveMode::DryRun);
+    return vr.m_kind == VarUseKind::Local;
+}
+
+bool WARN_UNUSED IsVariableResolvedToGlobal(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+{
+    VarResolveResult vr = ResolveVariable(ctx, bctx, varName, VarResolveMode::DryRun);
+    return vr.m_kind == VarUseKind::Global;
+}
+
+bool WARN_UNUSED IsVariableResolvedToFalseTrueNil(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+{
+    VarResolveResult vr = ResolveVariable(ctx, bctx, varName, VarResolveMode::DryRun);
+    return vr.m_kind == VarUseKind::FalseTrueNil;
+}
+
+bool WARN_UNUSED IsVariableResolvedToLocalOrFalseTrueNil(TranslationContext& ctx, BlockTranslationContext& bctx, std::string_view varName)
+{
+    VarResolveResult vr = ResolveVariable(ctx, bctx, varName, VarResolveMode::DryRun);
+    return vr.m_kind == VarUseKind::Local || vr.m_kind == VarUseKind::FalseTrueNil;
+}
+
+// Return true if 'expr' is a VariableUse that resolves to a local.
+// In which case, this function returns true, a read to the local is registered, and 'slot' will be stored the local variable ordinal
+//
+bool WARN_UNUSED DetectTrivialLocalVarUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* expr, uint32_t& slot /*output*/)
+{
+    if (expr->GetKind() == AstExprKind::VarUse &&
+        IsVariableResolvedToLocal(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name))
+    {
+        VarResolveResult vr = ResolveVariable(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name, VarResolveMode::ForRead);
+        TestAssert(vr.m_kind == VarUseKind::Local);
+        slot = vr.m_ord;
+        return true;
+    }
+    return false;
+}
+
+// Return true if 'expr' is a non-array constant, a VariableUse that resolves to a local,
+// or a VariableUse that resolves to a special global (true/false/nil)
+// In these cases, this function returns true, a read to the local is registered, and 'res' stores the information of the local or constant
+//
+bool WARN_UNUSED DetectTrivialLocalVarOrConstantUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* expr, LocalOrCstWrapper& res /*out*/)
+{
+    if (expr->IsNonArrayLiteral())
+    {
+        res = CreateConstantNonArray(assert_cast<AstLiteral*>(expr));
+        return true;
+    }
+
+    if (expr->GetKind() == AstExprKind::VarUse &&
+        IsVariableResolvedToLocalOrFalseTrueNil(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name))
+    {
+        VarResolveResult vr = ResolveVariable(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name, VarResolveMode::ForRead);
+        if (vr.m_kind == VarUseKind::Local)
+        {
+            res = Local(vr.m_ord);
+        }
+        else
+        {
+            TestAssert(vr.m_kind == VarUseKind::FalseTrueNil);
+            res = vr.GetTValueForFalseTrueNil();
+        }
+        return true;
+    }
+    return false;
+}
+
 void CompileVarUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstVariableUse* node, uint32_t /*clobberSlot*/, uint32_t destSlot)
 {
     ctx.UpdateTopSlot(destSlot);
-    VarResolveResult vr = ResolveVariable(ctx, bctx, node->m_varInfo.m_name, true /*forRead*/);
+    VarResolveResult vr = ResolveVariable(ctx, bctx, node->m_varInfo.m_name, VarResolveMode::ForRead);
     if (vr.m_kind == VarUseKind::Local)
     {
         ctx.m_builder.CreateMov({
@@ -537,12 +614,25 @@ void CompileVarUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstVa
             .output = Local(destSlot)
         });
     }
-    else
+    else if (vr.m_kind == VarUseKind::Global)
     {
-        TestAssert(vr.m_kind == VarUseKind::Global);
+#ifdef TESTBUILD
+        VM* vm = VM_GetActiveVMForCurrentThread();
+        TestAssert(vr.m_ord < vm->m_globalStringIdWithIndex.size());
+        std::string_view globalName = vm->m_interner.Get(vm->m_globalStringIdWithIndex[vr.m_ord]);
+        TestAssert(globalName != "false" && globalName != "true" && globalName != "nil");
+#endif
         ctx.m_builder.CreateSOMGlobalGet({
             .self = Local(0),
             .index = SafeIntegerCast<uint16_t>(vr.m_ord),
+            .output = Local(destSlot)
+        });
+    }
+    else
+    {
+        TestAssert(vr.m_kind == VarUseKind::FalseTrueNil);
+        ctx.m_builder.CreateMov({
+            .input = vr.GetTValueForFalseTrueNil(),
             .output = Local(destSlot)
         });
     }
@@ -586,7 +676,7 @@ void CompileAssignation(TranslationContext& ctx, BlockTranslationContext& bctx, 
     Local valToPut = Local(destSlot);
     for (VariableInfo& vi : node->m_lhs)
     {
-        VarResolveResult vr = ResolveVariable(ctx, bctx, vi.m_name, false /*forRead*/);
+        VarResolveResult vr = ResolveVariable(ctx, bctx, vi.m_name, VarResolveMode::ForWrite);
         EmitAssignValueToLhs(ctx, vr, valToPut);
     }
 }
@@ -597,28 +687,17 @@ void CompileTopLevelAssignation(TranslationContext& ctx, BlockTranslationContext
 {
     // If rhs is a local variable or a non-array literal, we can always directly move it into lhs
     //
-    if (node->m_rhs->IsNonArrayLiteral() ||
-        (node->m_rhs->GetKind() == AstExprKind::VarUse &&
-         IsVariableResolvedToLocal(ctx, bctx, assert_cast<AstVariableUse*>(node->m_rhs)->m_varInfo.m_name)))
     {
-        LocalOrCstWrapper valToPut = Local(0);  // ugly: it always require a constructor..
-        if (node->m_rhs->IsNonArrayLiteral())
+        LocalOrCstWrapper rhs = Local(0);
+        if (DetectTrivialLocalVarOrConstantUse(ctx, bctx, node->m_rhs, rhs /*out*/))
         {
-            valToPut = CreateConstantNonArray(assert_cast<AstLiteral*>(node->m_rhs));
+            for (VariableInfo& vi : node->m_lhs)
+            {
+                VarResolveResult vr = ResolveVariable(ctx, bctx, vi.m_name, VarResolveMode::ForWrite);
+                EmitAssignValueToLhs(ctx, vr, rhs);
+            }
+            return;
         }
-        else
-        {
-            TestAssert(node->m_rhs->GetKind() == AstExprKind::VarUse);
-            VarResolveResult vr = ResolveVariable(ctx, bctx, assert_cast<AstVariableUse*>(node->m_rhs)->m_varInfo.m_name, true /*forRead*/);
-            TestAssert(vr.m_kind == VarUseKind::Local);
-            valToPut = Local(vr.m_ord);
-        }
-        for (VariableInfo& vi : node->m_lhs)
-        {
-            VarResolveResult vr = ResolveVariable(ctx, bctx, vi.m_name, false /*forRead*/);
-            EmitAssignValueToLhs(ctx, vr, valToPut);
-        }
-        return;
     }
 
     {
@@ -635,7 +714,7 @@ void CompileTopLevelAssignation(TranslationContext& ctx, BlockTranslationContext
         }
         if (lhsLocalOrd != static_cast<size_t>(-1))
         {
-            VarResolveResult vr = ResolveVariable(ctx, bctx, node->m_lhs[lhsLocalOrd].m_name, false /*forRead*/);
+            VarResolveResult vr = ResolveVariable(ctx, bctx, node->m_lhs[lhsLocalOrd].m_name, VarResolveMode::ForWrite);
             TestAssert(vr.m_kind == VarUseKind::Local);
             uint32_t destSlot = vr.m_ord;
             Local valToPut = Local(destSlot);
@@ -646,7 +725,7 @@ void CompileTopLevelAssignation(TranslationContext& ctx, BlockTranslationContext
                 {
                     continue;
                 }
-                vr = ResolveVariable(ctx, bctx, node->m_lhs[i].m_name, false /*forRead*/);
+                vr = ResolveVariable(ctx, bctx, node->m_lhs[i].m_name, VarResolveMode::ForWrite);
                 EmitAssignValueToLhs(ctx, vr, valToPut);
             }
             return;
@@ -671,22 +750,6 @@ bool WARN_UNUSED ReceiverIsSelf(AstExpr* e)
 bool WARN_UNUSED ReceiverIsSuper(AstExpr* e)
 {
     return (e->GetKind() == AstExprKind::VarUse && assert_cast<AstVariableUse*>(e)->m_varInfo.m_name == "super");
-}
-
-// Return true if 'expr' is a VariableUse that resolves to a local.
-// In which case, this function returns true, a read to the local is registered, and 'slot' will be stored the local variable ordinal
-//
-bool WARN_UNUSED DetectTrivialLocalVarUse(TranslationContext& ctx, BlockTranslationContext& bctx, AstExpr* expr, uint32_t& slot /*output*/)
-{
-    if (expr->GetKind() == AstExprKind::VarUse &&
-        IsVariableResolvedToLocal(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name))
-    {
-        VarResolveResult vr = ResolveVariable(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name, true /*forRead*/);
-        TestAssert(vr.m_kind == VarUseKind::Local);
-        slot = vr.m_ord;
-        return true;
-    }
-    return false;
 }
 
 enum class SOMReceiverKind
@@ -1251,6 +1314,19 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                     shouldSkip = true;
                 }
             }
+            if (!shouldSkip)
+            {
+                if (receiver->GetKind() == AstExprKind::VarUse &&
+                    IsVariableResolvedToFalseTrueNil(ctx, bctx, assert_cast<AstVariableUse*>(receiver)->m_varInfo.m_name))
+                {
+                    shouldSkip = true;
+                }
+                if (args[0]->GetKind() == AstExprKind::VarUse &&
+                    IsVariableResolvedToFalseTrueNil(ctx, bctx, assert_cast<AstVariableUse*>(args[0])->m_varInfo.m_name))
+                {
+                    shouldSkip = true;
+                }
+            }
         }
 
         if (!shouldSkip)
@@ -1258,41 +1334,17 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
             uint32_t curClobberSlot = clobberSlot;
             LocalOrCstWrapper lhs = Local(0);
             LocalOrCstWrapper rhs = Local(0);
-            if (receiver->IsNonArrayLiteral())
+            if (!DetectTrivialLocalVarOrConstantUse(ctx, bctx, receiver, lhs /*out*/))
             {
-                lhs = CreateConstantNonArray(assert_cast<AstLiteral*>(receiver));
+                lhs = Local(curClobberSlot);
+                CompileExpression(ctx, bctx, receiver, curClobberSlot, curClobberSlot);
+                curClobberSlot++;
             }
-            else
+            if (!DetectTrivialLocalVarOrConstantUse(ctx, bctx, args[0], rhs /*out*/))
             {
-                uint32_t localVarSlot;
-                if (DetectTrivialLocalVarUse(ctx, bctx, receiver, localVarSlot /*out*/))
-                {
-                    lhs = Local(localVarSlot);
-                }
-                else
-                {
-                    lhs = Local(curClobberSlot);
-                    CompileExpression(ctx, bctx, receiver, curClobberSlot, curClobberSlot);
-                    curClobberSlot++;
-                }
-            }
-            if (args[0]->IsNonArrayLiteral())
-            {
-                rhs = CreateConstantNonArray(assert_cast<AstLiteral*>(args[0]));
-            }
-            else
-            {
-                uint32_t localVarSlot;
-                if (DetectTrivialLocalVarUse(ctx, bctx, args[0], localVarSlot /*out*/))
-                {
-                    rhs = Local(localVarSlot);
-                }
-                else
-                {
-                    rhs = Local(curClobberSlot);
-                    CompileExpression(ctx, bctx, args[0], curClobberSlot, curClobberSlot);
-                    curClobberSlot++;
-                }
+                rhs = Local(curClobberSlot);
+                CompileExpression(ctx, bctx, args[0], curClobberSlot, curClobberSlot);
+                curClobberSlot++;
             }
             ctx.UpdateTopSlot(curClobberSlot);
 
@@ -1424,6 +1476,14 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
                     .output = Local(destSlot)
                 });
             }
+            else if (selectorStringId == vm->m_strOperatorSlash.m_id)
+            {
+                ctx.m_builder.CreateOperatorSlash({
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .output = Local(destSlot)
+                });
+            }
             else
             {
                 TestAssert(selectorStringId == vm->m_strOperatorEqualEqual.m_id);
@@ -1469,11 +1529,16 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
             }
             // The bytecode supports constant RHS only if the operator is value: at: or char:
             //
-            if (args[0]->IsNonArrayLiteral() && (selectorStringId == vm->m_strOperatorValueColon.m_id ||
-                                                 selectorStringId == vm->m_strOperatorAtColon.m_id ||
-                                                 selectorStringId == vm->m_strOperatorCharAtColon.m_id))
+            if (selectorStringId == vm->m_strOperatorValueColon.m_id ||
+                selectorStringId == vm->m_strOperatorAtColon.m_id ||
+                selectorStringId == vm->m_strOperatorCharAtColon.m_id)
             {
-                rhs = CreateConstantNonArray(assert_cast<AstLiteral*>(args[0]));
+                if (!DetectTrivialLocalVarOrConstantUse(ctx, bctx, args[0], rhs /*out*/))
+                {
+                    rhs = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, args[0], curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
+                }
             }
             else
             {
@@ -1631,25 +1696,14 @@ void CompileSOMCall(TranslationContext& ctx, BlockTranslationContext& bctx, AstE
             }
             auto compileArg = [&](AstExpr* expr) ALWAYS_INLINE -> LocalOrCstWrapper
             {
-                if (expr->IsNonArrayLiteral())
+                LocalOrCstWrapper res = Local(0);
+                if (!DetectTrivialLocalVarOrConstantUse(ctx, bctx, expr, res /*out*/))
                 {
-                    return CreateConstantNonArray(assert_cast<AstLiteral*>(expr));
+                    res = Local(curClobberSlot);
+                    CompileExpression(ctx, bctx, expr, curClobberSlot, curClobberSlot);
+                    curClobberSlot++;
                 }
-                else
-                {
-                    uint32_t localVarSlot;
-                    if (DetectTrivialLocalVarUse(ctx, bctx, expr, localVarSlot /*out*/))
-                    {
-                        return Local(localVarSlot);
-                    }
-                    else
-                    {
-                        Local res = Local(curClobberSlot);
-                        CompileExpression(ctx, bctx, expr, curClobberSlot, curClobberSlot);
-                        curClobberSlot++;
-                        return res;
-                    }
-                }
+                return res;
             };
             LocalOrCstWrapper arg1 = compileArg(args[0]);
             LocalOrCstWrapper arg2 = compileArg(args[1]);
@@ -1924,7 +1978,7 @@ void CompileBlockBody(TranslationContext& ctx, BlockTranslationContext& bctx, As
                     //
                     if (bctx.ReturnValueMayBeDiscarded() &&
                         (expr->IsLiteral() ||
-                         (expr->GetKind() == AstExprKind::VarUse && IsVariableResolvedToLocalOrField(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name)) ||
+                         (expr->GetKind() == AstExprKind::VarUse && !IsVariableResolvedToGlobal(ctx, bctx, assert_cast<AstVariableUse*>(expr)->m_varInfo.m_name)) ||
                          expr->GetKind() == AstExprKind::NestedBlock))
                     {
                         // The return value expression has no observable side effects (note that global get *may* have observable effect!),
@@ -2167,6 +2221,130 @@ HeapPtr<FunctionObject> CompileMethod(TempArenaAllocator& alloc,
     uint32_t firstFreeSlot = InstallLocalVariables(*ctx, *bctx, meth, 1 /*startSlot*/);
     ctx->m_historyTopSlot = firstFreeSlot;
 
+    // Determine if this method is a trivial method
+    //
+    {
+        SOMMethodLookupResultKind triviality = SOM_NormalMethod;
+        TValue literalRetVal;           // useful for LiteralReturn
+        size_t globalOrFieldIdx = 0;        // useful for GlobalReturn/Getter/Setter
+        if (meth->m_body.size() == 0)
+        {
+            // Empty method body, behavior is return self
+            //
+            triviality = SOM_SelfReturn;
+        }
+        else if (meth->m_body.size() == 1)
+        {
+            // If the method body consists of a single return statement,
+            // the method may be a SelfReturn, LiteralReturn, GlobalReturn or Getter
+            //
+            if (meth->m_body[0]->GetKind() == AstExprKind::Return)
+            {
+                AstExpr* val = assert_cast<AstReturn*>(meth->m_body[0])->m_retVal;
+                if (val->IsNonArrayLiteral())
+                {
+                    triviality = SOM_LiteralReturn;
+                    literalRetVal = CreateConstantNonArray(assert_cast<AstLiteral*>(val));
+                }
+                else if (val->GetKind() == AstExprKind::VarUse)
+                {
+                    AstVariableUse* u = assert_cast<AstVariableUse*>(val);
+                    VarResolveResult vr = ResolveVariable(*ctx, *bctx, u->m_varInfo.m_name, VarResolveMode::DryRun);
+                    if (vr.m_kind == VarUseKind::Local)
+                    {
+                        if (u->m_varInfo.m_name == "self" || u->m_varInfo.m_name == "super")
+                        {
+                            triviality = SOM_SelfReturn;
+                        }
+                    }
+                    else if (vr.m_kind == VarUseKind::Field)
+                    {
+                        triviality = SOM_Getter;
+                        globalOrFieldIdx = vr.m_ord;
+                    }
+                    else if (vr.m_kind == VarUseKind::Global)
+                    {
+                        triviality = SOM_GlobalReturn;
+                        globalOrFieldIdx = vr.m_ord;
+                    }
+                    else if (vr.m_kind == VarUseKind::FalseTrueNil)
+                    {
+                        triviality = SOM_LiteralReturn;
+                        literalRetVal = vr.GetTValueForFalseTrueNil();
+                    }
+                    else
+                    {
+                        TestAssert(false && "unexpected");
+                    }
+                }
+            }
+        }
+
+        if (meth->m_params.size() == 1)
+        {
+            // For one-arg method, check if it is a Setter
+            // A setter should set a field to the argument value, and return self
+            //
+            AstAssignation* setterStmt = nullptr;
+            if (meth->m_body.size() == 1)
+            {
+                if (meth->m_body[0]->GetKind() == AstExprKind::Assignation)
+                {
+                    setterStmt = assert_cast<AstAssignation*>(meth->m_body[0]);
+                }
+            }
+            if (meth->m_body.size() == 2)
+            {
+                if (meth->m_body[0]->GetKind() == AstExprKind::Assignation)
+                {
+                    if (meth->m_body[1]->GetKind() == AstExprKind::Return)
+                    {
+                        AstReturn* retStmt = assert_cast<AstReturn*>(meth->m_body[1]);
+                        if (retStmt->m_retVal->GetKind() == AstExprKind::VarUse)
+                        {
+                            std::string_view varName = assert_cast<AstVariableUse*>(retStmt->m_retVal)->m_varInfo.m_name;
+                            if (varName == "self" || varName == "super")
+                            {
+                                setterStmt = assert_cast<AstAssignation*>(meth->m_body[0]);
+                            }
+                        }
+                    }
+                }
+            }
+            if (setterStmt != nullptr)
+            {
+                if (setterStmt->m_lhs.size() == 1)
+                {
+                    VarResolveResult vrLhs = ResolveVariable(*ctx, *bctx, setterStmt->m_lhs[0].m_name, VarResolveMode::DryRun);
+                    if (vrLhs.m_kind == VarUseKind::Field)
+                    {
+                        if (setterStmt->m_rhs->GetKind() == AstExprKind::VarUse)
+                        {
+                            if (assert_cast<AstVariableUse*>(setterStmt->m_rhs)->m_varInfo.m_name == meth->m_params[0].m_name)
+                            {
+                                triviality = SOM_Setter;
+                                globalOrFieldIdx = vrLhs.m_ord;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (triviality != SOM_NormalMethod)
+        {
+            ctx->m_resultUcb->m_trivialFnType = triviality;
+            if (triviality == SOM_LiteralReturn)
+            {
+                ctx->m_resultUcb->m_trivialFnInfo = literalRetVal.m_value;
+            }
+            else if (triviality != SOM_SelfReturn)
+            {
+                ctx->m_resultUcb->m_trivialFnInfo = globalOrFieldIdx;
+            }
+        }
+    }
+
     CompileBlockBody(*ctx, *bctx, meth, firstFreeSlot);
 
     UninstallLocalVariables(*ctx, *bctx, meth);
@@ -2289,7 +2467,11 @@ HeapPtr<FunctionObject> CompileMethod(TempArenaAllocator& alloc,
     CodeBlock* cb = ctx->m_resultUcb->m_defaultCodeBlock;
     TestAssert(cb->m_numUpvalues == 0);
 
-    return FunctionObject::Create(vm, cb).As();
+    return FunctionObject::CreateAndFillUpvalues(cb,
+                                                 nullptr /*CoroRuntimeCtx*/,
+                                                 nullptr /*stackBase*/,
+                                                 nullptr /*parent*/,
+                                                 static_cast<size_t>(-1) /*selfOrdInStackFrame*/).As();
 }
 
 // Populate the SOMClass's method array and static method array after both the class and the class-class is available

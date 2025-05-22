@@ -38,6 +38,17 @@ CodeBlock* WARN_UNUSED CodeBlock::Create(VM* vm, UnlinkedCodeBlock* ucb, UserHea
     cb->m_baselineCodeBlock = nullptr;
     cb->m_dfgCodeBlock = nullptr;
     cb->m_fnTyMask  = static_cast<uint8_t>(static_cast<uint8_t>(ucb->m_fnKind) + 16 * static_cast<uint8_t>(ucb->m_trivialFnType));
+    if (ucb->m_trivialFnType == SOM_LiteralReturn || ucb->m_trivialFnType == SOM_GlobalReturn || ucb->m_trivialFnType == SOM_Getter || ucb->m_trivialFnType == SOM_Setter)
+    {
+        TestAssert(ucb->m_numUpvalues == 0);
+        cb->m_needExtraUpvalueDueToTrivialFn = true;
+        cb->m_trivialFnExtraInfo = ucb->m_trivialFnInfo;
+    }
+    else
+    {
+        cb->m_needExtraUpvalueDueToTrivialFn = false;
+        cb->m_trivialFnExtraInfo = 0;
+    }
     if (vm->InterpreterCanTierUpFurther())
     {
         cb->m_interpreterTierUpCounter = x_interpreter_tier_up_threshold_bytecode_length_multiplier * ucb->m_bytecodeLengthIncludingTailPadding;
@@ -119,9 +130,9 @@ UserHeapPointer<FunctionObject> WARN_UNUSED NO_INLINE FunctionObject::CreateAndF
     VM* vm = VM::GetActiveVMForCurrentThread();
     UnlinkedCodeBlock* ucb = cb->m_owner;
     HeapPtr<FunctionObject> r = Create(vm, cb).As();
-    Assert(TranslateToRawPointer(TCGet(parent->m_executable).As())->IsBytecodeFunction());
-    Assert(cb->m_owner->m_parent == static_cast<HeapPtr<CodeBlock>>(TCGet(parent->m_executable).As())->m_owner);
     uint32_t numUpvalues = cb->m_numUpvalues;
+    AssertImp(numUpvalues > 0, TranslateToRawPointer(TCGet(parent->m_executable).As())->IsBytecodeFunction());
+    AssertImp(numUpvalues > 0, cb->m_owner->m_parent == static_cast<HeapPtr<CodeBlock>>(TCGet(parent->m_executable).As())->m_owner);
     UpvalueMetadata* upvalueInfo = ucb->m_upvalueInfo;
     for (uint32_t ord = 0; ord < numUpvalues; ord++)
     {
@@ -158,6 +169,11 @@ UserHeapPointer<FunctionObject> WARN_UNUSED NO_INLINE FunctionObject::CreateAndF
             TCSet(r->m_upvalues[ord], uv);
         }
     }
+    if (cb->m_needExtraUpvalueDueToTrivialFn)
+    {
+        TestAssert(cb->m_numUpvalues == 0 && r->m_numUpvalues == 1);
+        r->m_upvalues[0].m_value = cb->m_trivialFnExtraInfo;
+    }
     return r;
 }
 
@@ -186,6 +202,11 @@ FunctionObject* WARN_UNUSED NO_INLINE FunctionObject::CreateForDfgAndFillUpvalue
             TestAssertImp(!uvmt.m_isImmutable, reinterpret_cast<Upvalue*>(uv.m_value)->m_type == HeapEntityType::Upvalue);
             r->m_upvalues[ord] = uv;
         }
+    }
+    if (cb->m_needExtraUpvalueDueToTrivialFn)
+    {
+        TestAssert(cb->m_numUpvalues == 0 && r->m_numUpvalues == 1);
+        r->m_upvalues[0].m_value = cb->m_trivialFnExtraInfo;
     }
     return r;
 }

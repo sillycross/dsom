@@ -38,13 +38,17 @@ static void NO_RETURN SuperCallImpl(TValue* base, TValue self, TValue scTv, TVal
         __builtin_unreachable();
     }
     case SOM_NormalMethod:
-    case SOM_LiteralReturn:  // TODO: provide specialized impls
-    case SOM_GlobalReturn:
-    case SOM_Getter:
-    case SOM_Setter:
     {
         base[x_numSlotsForStackFrameHeader] = self;
         MakeInPlaceCall(fn, base + x_numSlotsForStackFrameHeader, numArgs, SuperCallReturnContinuation);
+    }
+    case SOM_Setter:
+    {
+        Return(ExecuteSetterTrivialMethod(fn, self, base[x_numSlotsForStackFrameHeader + 1]));
+    }
+    default:
+    {
+        Return(ExecuteTrivialMethodExceptSetter(fn, self, fnKind));
     }
     } /*switch*/
 }

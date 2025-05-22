@@ -332,8 +332,9 @@ bool WARN_UNUSED VM::InitializeVMGlobalData()
     m_strOperatorLeftShift = GetUniquedString("<<"); ReleaseAssert(m_strOperatorLeftShift.m_id == m_strOperatorTildeUnequal.m_id + 1);
     m_strOperatorRightShift = GetUniquedString(">>>"); ReleaseAssert(m_strOperatorRightShift.m_id == m_strOperatorLeftShift.m_id + 1);
     m_strOperatorBitwiseXor = GetUniquedString("bitXor:"); ReleaseAssert(m_strOperatorBitwiseXor.m_id == m_strOperatorRightShift.m_id + 1);
-    m_strOperatorEqualEqual = GetUniquedString("=="); ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorBitwiseXor.m_id + 1);
-    ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorPlus.m_id + 16);
+    m_strOperatorSlash = GetUniquedString("/"); ReleaseAssert(m_strOperatorSlash.m_id == m_strOperatorBitwiseXor.m_id + 1);
+    m_strOperatorEqualEqual = GetUniquedString("=="); ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorSlash.m_id + 1);
+    ReleaseAssert(m_strOperatorEqualEqual.m_id == m_strOperatorPlus.m_id + 17);
 
     // If you add new stuffs here, make sure to change IsSelectorInlinableControlFlow correspondingly.
     //

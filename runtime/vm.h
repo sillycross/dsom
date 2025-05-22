@@ -592,7 +592,7 @@ public:
         }
     }
 
-    static TValue VM_GetGlobal(uint16_t idx)
+    static TValue VM_GetGlobal(size_t idx)
     {
         TestAssert(idx < VM_GetActiveVMForCurrentThread()->m_globalsVec.size());
         TestAssert(VM_GetActiveVMForCurrentThread()->m_globalsVec.data() == VM_GetActiveVMForCurrentThread()->m_somGlobals);
@@ -667,6 +667,7 @@ public:
     SOMUniquedString m_strOperatorLeftShift;
     SOMUniquedString m_strOperatorRightShift;
     SOMUniquedString m_strOperatorBitwiseXor;
+    SOMUniquedString m_strOperatorSlash;
     SOMUniquedString m_strOperatorEqualEqual;
 
     bool IsSelectorInlinableControlFlow(size_t ord)

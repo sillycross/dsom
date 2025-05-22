@@ -157,7 +157,10 @@ void DoWork(int argc, char** argv)
 
     VM* vm = VM::Create();
 
-    //vm->SetEngineStartingTier(VM::EngineStartingTier::BaselineJIT);
+    if (x_allow_interpreter_tier_up_to_baseline_jit)
+    {
+        vm->SetEngineStartingTier(VM::EngineStartingTier::BaselineJIT);
+    }
 
     SOMInitializationResult r =  SOMBootstrapClassHierarchy();
 

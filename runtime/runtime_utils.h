@@ -443,6 +443,8 @@ public:
     uint32_t m_bytecodeMetadataLength;
 
     uint8_t m_fnTyMask;
+    bool m_needExtraUpvalueDueToTrivialFn;
+    uint64_t m_trivialFnExtraInfo;
 
     BaselineCodeBlock* m_baselineCodeBlock;
     DfgCodeBlock* m_dfgCodeBlock;
@@ -483,6 +485,7 @@ public:
         ucb->m_parserUVGetFixupList = nullptr;
         ucb->m_fnKind = SOMDetailEntityType::SOM_Method;
         ucb->m_trivialFnType = SOMMethodLookupResultKind::SOM_NormalMethod;
+        ucb->m_trivialFnInfo = 0;
         return ucb;
     }
 
@@ -552,6 +555,7 @@ public:
 
     SOMDetailEntityType m_fnKind;
     SOMMethodLookupResultKind m_trivialFnType;
+    uint64_t m_trivialFnInfo;
 
     std::string m_debugName;
 
@@ -920,7 +924,8 @@ public:
     //
     static UserHeapPointer<FunctionObject> WARN_UNUSED Create(VM* vm, CodeBlock* cb)
     {
-        uint32_t numUpvalues = cb->m_numUpvalues;
+        TestAssertImp(cb->m_needExtraUpvalueDueToTrivialFn, cb->m_numUpvalues == 0);
+        uint32_t numUpvalues = cb->m_numUpvalues + (cb->m_needExtraUpvalueDueToTrivialFn ? 1 : 0);
         Assert(numUpvalues <= std::numeric_limits<uint8_t>::max());
         UserHeapPointer<FunctionObject> r = CreateImpl(vm, static_cast<uint8_t>(numUpvalues), cb->m_fnTyMask);
         SystemHeapPointer<ExecutableCode> executable { static_cast<ExecutableCode*>(cb) };
@@ -944,6 +949,9 @@ public:
         Assert(ord < self->m_numUpvalues);
         Assert(TranslateToRawPointer(TCGet(self->m_executable).As())->IsBytecodeFunction());
         HeapPtr<CodeBlock> cb = static_cast<HeapPtr<CodeBlock>>(TCGet(self->m_executable).As());
+        // TrivialFn has no upvalues and should never reach here
+        //
+        Assert(!cb->m_needExtraUpvalueDueToTrivialFn);
         Assert(cb->m_numUpvalues == self->m_numUpvalues && cb->m_owner->m_numUpvalues == self->m_numUpvalues);
         Assert(cb->m_owner->m_upvalueInfo[ord].m_immutabilityFieldFinalized);
         return cb->m_owner->m_upvalueInfo[ord].m_isImmutable;

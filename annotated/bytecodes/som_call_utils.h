@@ -32,12 +32,34 @@ template<bool isSuper>
                 return std::make_pair(SOM_MethodNotFound, Undef<HeapPtr<FunctionObject>>());
             }
             uint8_t c_funcTy = f.As()->m_invalidArrayType >> 4;
-            int32_t c_result = f.m_value;
-            return ic->Effect([c_funcTy, c_result] {
-                IcSpecializeValueFullCoverage(c_funcTy, SOM_NormalMethod, SOM_LiteralReturn, SOM_GlobalReturn, SOM_Getter, SOM_Setter);
-                IcSpecifyCaptureValueRange(c_result, -2000000000, 0);
-                return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), GeneralHeapPointer<FunctionObject>(c_result).As());
-            });
+            if (c_funcTy == SOM_GlobalReturn)
+            {
+                Assert(f.As()->m_numUpvalues == 1);
+                TValue r = VM::VM_GetGlobal(f.As()->m_upvalues[0].m_value);
+                if (r.m_value == TValue::CreateImpossibleValue().m_value)
+                {
+                    return std::make_pair(SOM_NormalMethod, f.As());
+                }
+            }
+            if (c_funcTy == SOM_GlobalReturn || c_funcTy == SOM_Getter || c_funcTy == SOM_Setter)
+            {
+                Assert(f.As()->m_numUpvalues == 1);
+                int32_t c_result = SafeIntegerCast<int32_t>(f.As()->m_upvalues[0].m_value);
+                return ic->Effect([c_funcTy, c_result] {
+                    IcSpecializeValueFullCoverage(c_funcTy, SOM_GlobalReturn, SOM_Getter, SOM_Setter);
+                    IcSpecifyCaptureValueRange(c_result, 0, 100000000);
+                    return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), reinterpret_cast<HeapPtr<FunctionObject>>(static_cast<uint64_t>(c_result)));
+                });
+            }
+            else
+            {
+                int32_t c_result = f.m_value;
+                return ic->Effect([c_funcTy, c_result] {
+                    IcSpecializeValueFullCoverage(c_funcTy, SOM_NormalMethod, SOM_LiteralReturn, SOM_SelfReturn);
+                    IcSpecifyCaptureValueRange(c_result, -2000000000, 0);
+                    return std::make_pair(static_cast<SOMMethodLookupResultKind>(c_funcTy), GeneralHeapPointer<FunctionObject>(c_result).As());
+                });
+            }
         });
 }
 
@@ -65,4 +87,51 @@ template<auto RetCont>
         args->m_data[i + 1] = argStart[i];
     }
     MakeCall(handler.As(), self, fnName, TValue::Create<tObject>(TranslateToHeapPtr(args)), RetCont);
+}
+
+[[maybe_unused]] static TValue WARN_UNUSED ALWAYS_INLINE ExecuteTrivialMethodExceptSetter(HeapPtr<FunctionObject> fn, TValue self, SOMMethodLookupResultKind triviality)
+{
+    switch (triviality)
+    {
+    case SOM_LiteralReturn:
+    {
+        Assert(fn->m_numUpvalues == 1);
+        return TCGet(fn->m_upvalues[0]);
+    }
+    case SOM_GlobalReturn:
+    {
+        size_t globalIdx = reinterpret_cast<uint64_t>(fn);
+        TValue val = VM::VM_GetGlobal(globalIdx);
+        // IC implementation should not create IC case if the global does not exist yet,
+        // since in that case we must trigger unknownGlobal
+        //
+        Assert(val.m_value != TValue::CreateImpossibleValue().m_value);
+        return val;
+    }
+    case SOM_SelfReturn:
+    {
+        return self;
+    }
+    case SOM_Getter:
+    {
+        size_t fieldIdx = reinterpret_cast<uint64_t>(fn);
+        Assert(self.Is<tObject>());
+        HeapPtr<SOMObject> o = self.As<tObject>();
+        return TCGet(o->m_data[fieldIdx]);
+    }
+    default:
+    {
+        TestAssert(false);
+        __builtin_unreachable();
+    }
+    }   /*switch*/
+}
+
+[[maybe_unused]] static TValue WARN_UNUSED ALWAYS_INLINE ExecuteSetterTrivialMethod(HeapPtr<FunctionObject> fn, TValue self, TValue arg)
+{
+    size_t fieldIdx = reinterpret_cast<uint64_t>(fn);
+    Assert(self.Is<tObject>());
+    HeapPtr<SOMObject> o = self.As<tObject>();
+    o->m_data[fieldIdx].m_value = arg.m_value;
+    return self;
 }

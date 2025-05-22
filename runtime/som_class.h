@@ -40,12 +40,13 @@ enum SOMDetailEntityType : uint8_t
 enum SOMMethodLookupResultKind : uint8_t
 {
     SOM_MethodNotFound,
-    SOM_CallBaseNotObject,
     SOM_NormalMethod,
     SOM_LiteralReturn,
     SOM_GlobalReturn,
+    SOM_SelfReturn,
     SOM_Getter,
-    SOM_Setter
+    SOM_Setter,
+    SOM_CallBaseNotObject
 };
 
 class SOMObject : public UserHeapGcObjectHeader
